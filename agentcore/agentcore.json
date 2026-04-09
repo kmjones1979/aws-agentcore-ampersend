@@ -1,0 +1,27 @@
+{
+  "name": "AgentCorePOC",
+  "version": 1,
+  "tags": {
+    "agentcore:created-by": "agentcore-cli",
+    "agentcore:project-name": "AgentCorePOC"
+  },
+  "agents": [
+    {
+      "type": "AgentCoreRuntime",
+      "name": "AgentBuyer",
+      "build": "Container",
+      "entrypoint": "main.py",
+      "codeLocation": "app/AgentBuyer/",
+      "runtimeVersion": "PYTHON_3_12",
+      "networkMode": "PUBLIC",
+      "modelProvider": "Bedrock",
+      "protocol": "HTTP"
+    }
+  ],
+  "memories": [],
+  "credentials": [],
+  "evaluators": [],
+  "onlineEvalConfigs": [],
+  "agentCoreGateways": [],
+  "policyEngines": []
+}

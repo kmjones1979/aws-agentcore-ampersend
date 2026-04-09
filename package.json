@@ -1,0 +1,20 @@
+{
+  "name": "agentcore-ampersend-poc",
+  "private": true,
+  "version": "0.0.1",
+  "description": "POC combining AWS Bedrock AgentCore with Ampersend SDK for x402 agent payments",
+  "scripts": {
+    "seller:dev": "pnpm --filter @poc/seller dev",
+    "buyer:naive": "pnpm --filter @poc/buyer naive",
+    "buyer:mcp": "pnpm --filter @poc/buyer mcp",
+    "buyer:http": "pnpm --filter @poc/buyer http",
+    "buyer:proxy": "pnpm --filter @poc/buyer proxy",
+    "web:dev": "pnpm --filter @poc/web dev",
+    "build": "pnpm -r build",
+    "clean": "pnpm -r clean"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "pnpm@10.30.3+sha512.c961d1e0a2d8e354ecaa5166b822516668b7f44cb5bd95122d590dd81922f606f5473b6d23ec4a5be05e7fcd18e8488d47d978bbe981872f1145d06e9a740017"
+}

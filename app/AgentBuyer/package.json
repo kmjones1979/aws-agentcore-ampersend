@@ -1,0 +1,26 @@
+{
+  "name": "agent-buyer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/agent.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/agent.js",
+    "dev": "npx tsx --watch agent.ts"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "bedrock-agentcore": "^0.2.0",
+    "@ampersend_ai/ampersend-sdk": "^0.0.16",
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "viem": "^2.45.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0",
+    "tsx": "^4.21.0"
+  }
+}
