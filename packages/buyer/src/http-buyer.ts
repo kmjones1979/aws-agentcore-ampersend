@@ -10,7 +10,9 @@
  *   # or
  *   BUYER_PRIVATE_KEY=0x... pnpm --filter @poc/buyer http
  */
-import "dotenv/config";
+import { config } from "dotenv";
+import { resolve } from "path";
+config({ path: resolve(import.meta.dirname, "../../../.env") });
 import {
   wrapWithAmpersend,
 } from "@ampersend_ai/ampersend-sdk/x402";

@@ -12,7 +12,9 @@
  *   # With raw key (testing):
  *   BUYER_PRIVATE_KEY=0x... pnpm --filter @poc/buyer naive
  */
-import "dotenv/config";
+import { config } from "dotenv";
+import { resolve } from "path";
+config({ path: resolve(import.meta.dirname, "../../../.env") });
 import {
   Client,
   StreamableHTTPClientTransport,

@@ -12,7 +12,9 @@
  *   CDP_API_KEY_SECRET=... \
  *   pnpm --filter @poc/buyer mcp
  */
-import "dotenv/config";
+import { config } from "dotenv";
+import { resolve } from "path";
+config({ path: resolve(import.meta.dirname, "../../../.env") });
 import { createAmpersendTreasurer } from "@ampersend_ai/ampersend-sdk";
 import {
   Client,
