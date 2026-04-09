@@ -16,6 +16,7 @@
     "@ampersend_ai/ampersend-sdk": "^0.0.16",
     "@modelcontextprotocol/sdk": "^1.20.0",
     "bedrock-agentcore": "^0.2.0",
+    "dotenv": "^16.4.7",
     "viem": "^2.47.11"
   },
   "devDependencies": {

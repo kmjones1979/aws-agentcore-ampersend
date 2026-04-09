@@ -3,8 +3,7 @@
  * with x402 payment handling matching ClawRouter's own protocol.
  *
  * Uses the same EIP-712 TransferWithAuthorization signing that
- * ClawRouter's local proxy uses, with the ampersend-sdk AccountWallet
- * providing the signing key.
+ * ClawRouter's local proxy uses (`SELLER_PRIVATE_KEY` via viem).
  */
 
 import { signTypedData, privateKeyToAccount } from "viem/accounts";

@@ -1,4 +1,23 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { config as loadEnv } from "dotenv";
 import { BedrockAgentCoreApp } from "bedrock-agentcore/runtime";
+
+/** Walk up from this file (src/ or dist/) to find repo-root `.env` for local runs. */
+function loadRepoDotenv(): void {
+  let dir = import.meta.dirname;
+  for (let i = 0; i < 6; i++) {
+    const candidate = resolve(dir, ".env");
+    if (existsSync(candidate)) {
+      loadEnv({ path: candidate });
+      return;
+    }
+    const parent = resolve(dir, "..");
+    if (parent === dir) break;
+    dir = parent;
+  }
+}
+loadRepoDotenv();
 import {
   Client,
   StreamableHTTPClientTransport,
@@ -161,4 +180,6 @@ const app = new BedrockAgentCoreApp({
 
 app.run();
 
-console.log("[agent-buyer] AgentCore app started — seller tools powered by ClawRouter via x402");
+console.log(
+  "[agent-buyer] AgentCore app started — invokes paid MCP tools on SELLER_URL (seller may use ClawRouter internally)",
+);
