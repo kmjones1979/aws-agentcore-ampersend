@@ -1,6 +1,6 @@
 {
   "name": "@poc/seller",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,8 +11,10 @@
   },
   "dependencies": {
     "@ampersend_ai/ampersend-sdk": "^0.0.16",
-    "@aws-sdk/client-bedrock-runtime": "^3.700.0",
+    "@x402/core": "^2.5.0",
+    "@x402/fetch": "^2.5.0",
     "dotenv": "^16.4.7",
+    "viem": "^2.45.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {

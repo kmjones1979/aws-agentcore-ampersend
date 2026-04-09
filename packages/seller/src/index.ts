@@ -4,10 +4,7 @@ import {
   withX402Payment,
   FastMCP,
 } from "@ampersend_ai/ampersend-sdk/mcp/server/fastmcp";
-import {
-  BedrockRuntimeClient,
-  InvokeModelCommand,
-} from "@aws-sdk/client-bedrock-runtime";
+import { askClawRouter } from "./clawrouter.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -25,36 +22,6 @@ const USDC_ASSET =
   NETWORK === "base-sepolia"
     ? "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
     : "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-
-// ---------------------------------------------------------------------------
-// Bedrock client (Claude)
-// ---------------------------------------------------------------------------
-
-const bedrock = new BedrockRuntimeClient({
-  region: process.env.AWS_REGION ?? "us-west-2",
-});
-
-async function askClaude(prompt: string): Promise<string> {
-  try {
-    const command = new InvokeModelCommand({
-      modelId: "anthropic.claude-3-haiku-20240307-v1:0",
-      contentType: "application/json",
-      accept: "application/json",
-      body: JSON.stringify({
-        anthropic_version: "bedrock-2023-05-31",
-        max_tokens: 1024,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-    const response = await bedrock.send(command);
-    const body = JSON.parse(new TextDecoder().decode(response.body));
-    return body.content?.[0]?.text ?? "No response from model.";
-  } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.warn("[seller] Bedrock call failed, using mock response:", msg);
-    return `[Mock response — Bedrock unavailable] Here is a simulated answer for: "${prompt}"`;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Payment helpers
@@ -82,13 +49,13 @@ function makeRequirements(
 // FastMCP Server
 // ---------------------------------------------------------------------------
 
-const server = new FastMCP({ name: "ampersend-seller", version: "0.0.1" });
+const server = new FastMCP({ name: "ampersend-seller", version: "0.0.2" });
 
-// Tool 1: Research a topic — $0.01 USDC (10000 micro-units, USDC has 6 decimals)
+// Tool 1: Research a topic — $0.01 USDC
 server.addTool({
   name: "research_topic",
   description:
-    "Research a topic using AI. Returns a comprehensive overview. Costs 0.01 USDC per call.",
+    "Research a topic using AI (powered by ClawRouter). Costs 0.01 USDC per call.",
   parameters: z.object({
     topic: z.string().describe("The topic to research"),
     depth: z
@@ -116,16 +83,15 @@ server.addTool({
         ? `Provide a detailed, multi-paragraph research overview of: ${args.topic}. Include key facts, history, and current developments.`
         : `Provide a brief research overview of: ${args.topic}. Keep it concise — 2-3 paragraphs.`;
 
-    const result = await askClaude(prompt);
-    return result;
+    return await askClawRouter(prompt);
   }),
 });
 
-// Tool 2: Summarize text — $0.005 USDC (5000 micro-units)
+// Tool 2: Summarize text — $0.005 USDC
 server.addTool({
   name: "summarize_text",
   description:
-    "Summarize provided text using AI. Costs 0.005 USDC per call.",
+    "Summarize provided text using AI (powered by ClawRouter). Costs 0.005 USDC per call.",
   parameters: z.object({
     text: z.string().describe("The text to summarize"),
     max_sentences: z
@@ -149,16 +115,15 @@ server.addTool({
     },
   })(async (args: { text: string; max_sentences: number }) => {
     const prompt = `Summarize the following text in at most ${args.max_sentences} sentences:\n\n${args.text}`;
-    const result = await askClaude(prompt);
-    return result;
+    return await askClawRouter(prompt);
   }),
 });
 
-// Tool 3: Generate code — $0.02 USDC (20000 micro-units)
+// Tool 3: Generate code — $0.02 USDC
 server.addTool({
   name: "generate_code",
   description:
-    "Generate code from a natural language description. Costs 0.02 USDC per call.",
+    "Generate code from a natural language description (powered by ClawRouter). Costs 0.02 USDC per call.",
   parameters: z.object({
     description: z
       .string()
@@ -184,8 +149,7 @@ server.addTool({
     },
   })(async (args: { description: string; language: string }) => {
     const prompt = `Generate ${args.language} code for the following:\n\n${args.description}\n\nReturn only the code with brief comments. No explanations outside the code.`;
-    const result = await askClaude(prompt);
-    return result;
+    return await askClawRouter(prompt);
   }),
 });
 
@@ -198,7 +162,9 @@ server.start({
   httpStream: { port: SELLER_PORT },
 });
 
+const model = process.env.CLAWROUTER_MODEL ?? "blockrun/auto";
 console.log(`[seller] FastMCP server listening on http://localhost:${SELLER_PORT}/mcp`);
+console.log(`[seller] LLM backend: ClawRouter (${model}) via x402`);
 console.log(`[seller] Seller wallet: ${SELLER_ADDRESS}`);
 console.log(`[seller] Network: ${NETWORK}`);
 console.log(`[seller] Tools: research_topic, summarize_text, generate_code`);

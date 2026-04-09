@@ -1,6 +1,8 @@
-# AgentCore + Ampersend SDK — Proof of Concept
+# AgentCore + Ampersend SDK + ClawRouter — Proof of Concept
 
-TypeScript POC combining **AWS Bedrock AgentCore** (AI agent hosting) with the **Ampersend SDK** (x402 micropayment protocol) to demonstrate paid AI agent services with both buyer and seller roles.
+TypeScript POC combining **AWS Bedrock AgentCore** (agent hosting), **Ampersend SDK** (x402 payment protocol), and **ClawRouter** (smart LLM routing) to demonstrate paid AI agent services with both buyer and seller roles.
+
+> **Branch `blockrun-ampersend`**: Uses [ClawRouter](https://github.com/edgeandnode/ClawRouter) as the LLM backend (with ampersend-sdk x402 in front) and the [AgentCore wallet pattern](https://github.com/aws-samples/sample-agentcore-cloudfront-x402-payments) (Coinbase CDP) for buyer-side payment signing.
 
 ## Architecture
 
@@ -9,14 +11,14 @@ TypeScript POC combining **AWS Bedrock AgentCore** (AI agent hosting) with the *
         │
         ▼
   ┌─────────────────────────────────────────────┐
-  │             Buyer Patterns                   │
+  │          Buyer Patterns                      │
+  │  (AgentCore Wallet — Coinbase CDP)           │
   │                                              │
   │  ┌──────────┐ ┌───────────┐ ┌────────────┐  │
   │  │  Naive    │ │ Ampersend │ │ MCP Proxy  │  │
   │  │ Treasurer │ │ Treasurer │ │   (:8402)  │  │
-  │  │ (test)   │ │ (prod)    │ │            │  │
+  │  │ (test)    │ │ (prod)    │ │            │  │
   │  └─────┬────┘ └─────┬─────┘ └──────┬─────┘  │
-  │        │             │              │         │
   └────────┼─────────────┼──────────────┼─────────┘
            │             │              │
            └─────────────┼──────────────┘
@@ -30,37 +32,42 @@ TypeScript POC combining **AWS Bedrock AgentCore** (AI agent hosting) with the *
   │  summarize_text   0.005 USDC                  │
   │  generate_code    0.02  USDC                  │
   │                    │                          │
+  │                    │ x402 payment (ampersend)  │
   │                    ▼                          │
-  │            AWS Bedrock (Claude)                │
-  └───────────────────────────────────────────────┘
-
-  AgentCore Runtime (optional deploy)
-  ┌──────────────────────────────────────────────┐
-  │  AgentBuyer — TypeScript container agent      │
-  │  BedrockAgentCoreApp + Ampersend MCP client   │
-  │  Calls seller tools autonomously              │
+  │       ClawRouter (blockrun.ai/api)            │
+  │       41+ LLM models, smart routing           │
   └───────────────────────────────────────────────┘
 ```
 
+The seller is **both a seller and a buyer**:
+- Sells AI tools to clients via x402 (FastMCP middleware)
+- Buys LLM inference from ClawRouter via x402 (ampersend HTTP client)
+
 ## What This Demonstrates
 
-| Use Case | Component | Ampersend SDK Feature |
+| Use Case | Component | Key Feature |
 |---|---|---|
-| **Seller** — charge for AI tools | `packages/seller` | `withX402Payment` middleware on FastMCP |
-| **Buyer (test)** — auto-approve payments | `packages/buyer/naive-buyer.ts` | `AccountWallet` + inline NaiveTreasurer |
-| **Buyer (prod)** — spend-limited payments | `packages/buyer/mcp-buyer.ts` | `createAmpersendMcpClient` + `AmpersendTreasurer` |
-| **Buyer (HTTP)** — paid HTTP API calls | `packages/buyer/http-buyer.ts` | `createAmpersendHttpClient` + `wrapFetchWithPayment` |
-| **MCP Proxy** — transparent payment proxy | `packages/buyer/proxy.ts` | `createAmpersendProxy` |
-| **AgentCore agent** — autonomous buyer | `app/AgentBuyer/agent.ts` | `BedrockAgentCoreApp` + Ampersend MCP client |
-| **Dashboard** — visualize payment flows | `packages/web` | NextJS UI |
+| **Seller** — charge for AI tools | `packages/seller` | `withX402Payment` + ClawRouter LLM backend |
+| **LLM payment** — pay-per-request AI | `packages/seller/clawrouter.ts` | ampersend-sdk x402 HTTP client → BlockRun API |
+| **Buyer (test)** — auto-approve | `packages/buyer/naive-buyer.ts` | AgentCore wallet + NaiveTreasurer |
+| **Buyer (prod)** — spend-limited | `packages/buyer/mcp-buyer.ts` | AgentCore wallet + AmpersendTreasurer |
+| **HTTP buyer** — paid HTTP calls | `packages/buyer/http-buyer.ts` | AgentCore wallet + x402 fetch |
+| **MCP Proxy** — transparent proxy | `packages/buyer/proxy.ts` | AgentCore wallet + payment proxy |
+| **AgentCore agent** — autonomous buyer | `app/AgentBuyer/agent.ts` | BedrockAgentCoreApp + AgentCore wallet |
+| **Dashboard** — visualize flows | `packages/web` | NextJS UI |
+
+## Key Changes (vs `main` branch)
+
+1. **ClawRouter replaces Bedrock** — The seller calls `blockrun.ai/api/v1/chat/completions` (OpenAI-compatible) instead of AWS Bedrock directly. ampersend-sdk wraps these calls with x402 payment handling, so the seller pays per-LLM-request via USDC.
+
+2. **AgentCore Wallet** — All buyer-side x402 payments use the Coinbase CDP wallet pattern (from the [AWS AgentCore x402 sample](https://github.com/aws-samples/sample-agentcore-cloudfront-x402-payments)). Wallet credentials come from CDP API keys (production) or a raw private key (testing).
 
 ## Prerequisites
 
 - **Node.js 20+** and **pnpm**
-- **AWS credentials** configured (`aws configure`) with Bedrock model access (Claude Haiku)
-- **Docker** (for AgentCore container deployment)
-- **Private key** with test USDC on Base Sepolia ([Circle faucet](https://faucet.circle.com))
-- **Ampersend account** (optional, for `AmpersendTreasurer` — run `npx @ampersend_ai/ampersend-sdk setup start`)
+- **Coinbase Developer Platform** account ([portal.cdp.coinbase.com](https://portal.cdp.coinbase.com/)) for CDP wallet credentials
+- **USDC on Base Sepolia** ([Circle faucet](https://faucet.circle.com)) — fund both buyer and seller wallets
+- **Docker** (optional, for AgentCore container deployment)
 
 ## Quick Start
 
@@ -74,10 +81,24 @@ pnpm install
 
 ```bash
 cp .env.example .env
-# Edit .env with your keys:
-#   BUYER_PRIVATE_KEY=0x...          (for naive buyer)
-#   SELLER_WALLET_ADDRESS=0x...      (address to receive payments)
-#   AWS_REGION=us-west-2
+```
+
+Edit `.env`:
+
+```bash
+# Option A: CDP wallet (production)
+CDP_API_KEY_ID=your-key-id
+CDP_API_KEY_SECRET=your-key-secret
+
+# Option B: Raw private key (testing)
+BUYER_PRIVATE_KEY=0x...
+
+# Seller config
+SELLER_WALLET_ADDRESS=0x...    # receives payment from buyers
+SELLER_PRIVATE_KEY=0x...       # pays ClawRouter for LLM calls
+
+# ClawRouter model (optional)
+CLAWROUTER_MODEL=blockrun/auto  # auto | eco | premium | free
 ```
 
 ### 3. Start the seller
@@ -85,19 +106,16 @@ cp .env.example .env
 ```bash
 pnpm seller:dev
 # FastMCP server on http://localhost:8000/mcp
+# LLM backend: ClawRouter via x402
 ```
 
 ### 4. Run a buyer
 
-In a separate terminal:
-
 ```bash
-# Naive buyer (auto-approves all payments)
-BUYER_PRIVATE_KEY=0x... pnpm buyer:naive
+# Naive buyer (auto-approves, uses AgentCore wallet)
+pnpm buyer:naive
 
-# Or Ampersend buyer (spend-limited, needs smart account)
-BUYER_SMART_ACCOUNT_ADDRESS=0x... \
-BUYER_SESSION_KEY_PRIVATE_KEY=0x... \
+# Or with Ampersend spend limits
 pnpm buyer:mcp
 ```
 
@@ -108,117 +126,71 @@ pnpm web:dev
 # Open http://localhost:3000
 ```
 
-### 6. (Optional) Start the MCP proxy
+## AgentCore Wallet Provider
 
-```bash
-BUYER_SMART_ACCOUNT_ADDRESS=0x... \
-BUYER_SESSION_KEY_PRIVATE_KEY=0x... \
-pnpm buyer:proxy
-# Proxy on http://localhost:8402
-# Connect clients to: http://localhost:8402/mcp?target=http://localhost:8000/mcp
+The `AgentCoreWalletProvider` (`packages/buyer/src/agentcore-wallet.ts`) follows the AWS sample pattern:
+
+```typescript
+import { createAgentCoreWallet } from "./agentcore-wallet.js";
+
+// Automatically resolves credentials:
+// 1. CDP_API_KEY_ID + CDP_API_KEY_SECRET → CDP managed wallet
+// 2. BUYER_PRIVATE_KEY → local testing wallet
+// 3. Neither → ephemeral wallet (unfunded)
+const wallet = await createAgentCoreWallet();
+
+// Get address and treasurer
+console.log(wallet.getAddress());          // 0x...
+console.log(wallet.getMode());             // "cdp" | "local"
+
+const treasurer = wallet.createNaiveTreasurer();  // for x402 payments
 ```
 
-## AgentCore Deployment
+In production, CDP credentials would be stored in **AWS Secrets Manager** and retrieved just-in-time by the AgentCore runtime.
 
-The `app/AgentBuyer` directory contains a TypeScript agent that can be deployed to AWS Bedrock AgentCore Runtime.
+## ClawRouter Integration
 
-### Local testing
+The seller uses ampersend-sdk as an x402 buyer of ClawRouter's LLM service:
 
-```bash
-# Install AgentCore CLI
-npm install -g @aws/agentcore
+```typescript
+import { askClawRouter } from "./clawrouter.js";
 
-# Test locally (requires Docker)
-agentcore dev --runtime AgentBuyer
+// Calls blockrun.ai/api with automatic x402 payment
+const response = await askClawRouter("Explain quantum computing");
 ```
 
-### Deploy to AWS
-
-```bash
-# Edit agentcore/aws-targets.json with your account ID and region
-agentcore deploy
-
-# Invoke the deployed agent
-agentcore invoke "Research the x402 payment protocol"
-```
+ClawRouter routes each request to the cheapest capable model (41+ options across OpenAI, Anthropic, Google, DeepSeek, xAI, etc.) — paying per-request via USDC.
 
 ## Project Structure
 
 ```
 aws-agentcore-ampersend/
 ├── packages/
-│   ├── seller/                     # FastMCP server with paid AI tools
-│   │   └── src/index.ts            # 3 tools: research, summarize, generate
-│   ├── buyer/                      # All buyer pattern demos
+│   ├── seller/
 │   │   └── src/
-│   │       ├── naive-buyer.ts      # NaiveTreasurer (auto-approve)
-│   │       ├── mcp-buyer.ts        # AmpersendTreasurer (spend-limited)
-│   │       ├── http-buyer.ts       # x402 HTTP fetch client
+│   │       ├── index.ts            # FastMCP server with paid tools
+│   │       └── clawrouter.ts       # ClawRouter LLM client via ampersend x402
+│   ├── buyer/
+│   │   └── src/
+│   │       ├── agentcore-wallet.ts # AgentCore wallet provider (CDP)
+│   │       ├── naive-buyer.ts      # NaiveTreasurer buyer
+│   │       ├── mcp-buyer.ts        # AmpersendTreasurer buyer
+│   │       ├── http-buyer.ts       # HTTP x402 buyer
 │   │       └── proxy.ts            # MCP payment proxy
 │   └── web/                        # NextJS dashboard
-│       └── src/app/
-│           ├── page.tsx            # Main dashboard
-│           ├── api/invoke/         # API route for tool invocation
-│           └── components/         # UI components
-├── app/
-│   └── AgentBuyer/                 # AgentCore TypeScript agent
-│       ├── agent.ts                # BedrockAgentCoreApp entrypoint
-│       ├── Dockerfile
-│       └── package.json
+├── app/AgentBuyer/                 # AgentCore container agent
 ├── agentcore/                      # AgentCore CLI config
-│   ├── agentcore.json
-│   └── aws-targets.json
-├── package.json                    # pnpm workspace root
-├── pnpm-workspace.yaml
-├── tsconfig.base.json
 └── .env.example
-```
-
-## Key Concepts
-
-### x402 Payment Flow
-
-1. **Client calls tool** → Seller returns HTTP 402 with payment requirements
-2. **Treasurer authorizes** → Checks spend limits, creates signed payment
-3. **Client retries with payment** → Seller verifies payment, executes tool
-4. **Settlement** → Payment confirmed on-chain
-
-### Treasurer Patterns
-
-- **NaiveTreasurer**: Auto-approves everything. No spend limits. Testing only.
-- **AmpersendTreasurer**: Calls Ampersend API to authorize within user-defined spending limits. Production pattern.
-
-### Seller Middleware
-
-The `withX402Payment` middleware wraps any FastMCP tool execute function:
-
-```typescript
-server.addTool({
-  name: "my_tool",
-  execute: withX402Payment({
-    onExecute: async ({ args }) => {
-      // Return payment requirements, or null if free
-      return { scheme: "exact", maxAmountRequired: "10000", ... };
-    },
-    onPayment: async ({ payment, requirements }) => {
-      // Verify and settle the payment
-      return { success: true };
-    },
-  })(async (args) => {
-    // Actual tool logic runs after payment
-    return "result";
-  }),
-});
 ```
 
 ## Technologies
 
-- [AWS Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/) — AI agent hosting and deployment
-- [Ampersend SDK](https://github.com/edgeandnode/ampersend-sdk) — x402 payment protocol for agents
-- [x402](https://github.com/coinbase/x402) — Transport-agnostic micropayment protocol
-- [FastMCP](https://github.com/jlowin/fastmcp) — Model Context Protocol server framework
-- [Next.js](https://nextjs.org) — React framework for the dashboard
-- [Tailwind CSS](https://tailwindcss.com) — Styling
+- [AWS Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/) — Agent hosting
+- [Ampersend SDK](https://github.com/edgeandnode/ampersend-sdk) — x402 payment protocol
+- [ClawRouter](https://github.com/edgeandnode/ClawRouter) — Smart LLM routing (41+ models)
+- [x402](https://github.com/coinbase/x402) — Micropayment protocol (USDC)
+- [Coinbase CDP](https://docs.cdp.coinbase.com/) — Wallet management
+- [Next.js](https://nextjs.org) + [Tailwind CSS](https://tailwindcss.com) — Dashboard
 
 ## License
 

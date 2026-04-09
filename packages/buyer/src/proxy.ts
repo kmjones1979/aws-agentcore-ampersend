@@ -1,50 +1,33 @@
 /**
- * MCP Payment Proxy — transparent x402 payment handling.
+ * MCP Payment Proxy — transparent x402 payment handling with AgentCore wallet.
  *
  * Sits between any standard MCP client and a paid MCP server.
- * Clients connect to this proxy instead of the seller directly;
- * the proxy intercepts 402 responses, creates payments via the
- * Ampersend Treasurer, and retries transparently.
+ * Uses the AgentCore wallet provider for payment signing.
  *
  * Usage:
- *   BUYER_SMART_ACCOUNT_ADDRESS=0x... \
- *   BUYER_SESSION_KEY_PRIVATE_KEY=0x... \
- *   pnpm --filter @poc/buyer proxy
+ *   CDP_API_KEY_ID=... CDP_API_KEY_SECRET=... pnpm --filter @poc/buyer proxy
+ *   # or
+ *   BUYER_PRIVATE_KEY=0x... pnpm --filter @poc/buyer proxy
  *
  * Then connect MCP clients to:
  *   http://localhost:8402/mcp?target=http://localhost:8000/mcp
  */
 import "dotenv/config";
-import { createAmpersendProxy } from "@ampersend_ai/ampersend-sdk";
-import type { Address, Hex } from "viem";
+import { initializeProxyServer } from "@ampersend_ai/ampersend-sdk";
+import { createAgentCoreWallet } from "./agentcore-wallet.js";
 
 const PROXY_PORT = Number(process.env.PROXY_PORT ?? 8402);
 
 async function main() {
-  const smartAccountAddress = process.env.BUYER_SMART_ACCOUNT_ADDRESS as
-    | Address
-    | undefined;
-  const sessionKeyPrivateKey = process.env.BUYER_SESSION_KEY_PRIVATE_KEY as
-    | Hex
-    | undefined;
+  const walletProvider = await createAgentCoreWallet();
+  console.log(`[proxy] AgentCore wallet: ${walletProvider.getAddress()} (${walletProvider.getMode()} mode)`);
 
-  if (!smartAccountAddress || !sessionKeyPrivateKey) {
-    console.error(
-      "Set BUYER_SMART_ACCOUNT_ADDRESS and BUYER_SESSION_KEY_PRIVATE_KEY in .env",
-    );
-    process.exit(1);
-  }
+  const treasurer = walletProvider.createNaiveTreasurer();
 
-  console.log("[proxy] Starting MCP payment proxy");
-  console.log(`[proxy] Smart account: ${smartAccountAddress}`);
-
-  const { server } = await createAmpersendProxy({
-    port: PROXY_PORT,
-    smartAccountAddress,
-    sessionKeyPrivateKey,
-    apiUrl: process.env.AMPERSEND_API_URL ?? "https://api.ampersend.ai",
-    chainId: process.env.CHAIN_NETWORK === "base" ? 8453 : 84532,
-  });
+  const { server } = await initializeProxyServer({
+    transport: { port: PROXY_PORT },
+    treasurer,
+  } as any);
 
   console.log(`[proxy] Listening on http://localhost:${PROXY_PORT}`);
   console.log(

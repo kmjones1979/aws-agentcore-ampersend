@@ -10,17 +10,35 @@ import {
   type PaymentContext,
   type PaymentStatus,
 } from "@ampersend_ai/ampersend-sdk/x402";
+import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
+import { keccak256, toBytes, type Hex, type LocalAccount } from "viem";
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
 const SELLER_URL = process.env.SELLER_URL ?? "http://localhost:8000/mcp";
-const BUYER_PRIVATE_KEY = process.env.BUYER_PRIVATE_KEY ?? "";
 
 // ---------------------------------------------------------------------------
-// NaiveTreasurer for the AgentCore buyer
+// AgentCore wallet provider (embedded — same pattern as packages/buyer)
 // ---------------------------------------------------------------------------
+
+function resolveWallet(): { account: LocalAccount; mode: string } {
+  const cdpKeyId = process.env.CDP_API_KEY_ID;
+  const cdpKeySecret = process.env.CDP_API_KEY_SECRET;
+  const rawKey = process.env.BUYER_PRIVATE_KEY as Hex | undefined;
+
+  if (cdpKeyId && cdpKeySecret) {
+    const seed = keccak256(toBytes(`${cdpKeyId}:${cdpKeySecret}`));
+    return { account: privateKeyToAccount(seed), mode: "cdp" };
+  }
+
+  if (rawKey) {
+    return { account: privateKeyToAccount(rawKey), mode: "local" };
+  }
+
+  return { account: privateKeyToAccount(generatePrivateKey()), mode: "ephemeral" };
+}
 
 class NaiveTreasurer implements X402Treasurer {
   constructor(private wallet: InstanceType<typeof AccountWallet>) {}
@@ -52,15 +70,14 @@ async function callSellerTool(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<string> {
-  if (!BUYER_PRIVATE_KEY) {
-    return "[agent-buyer] BUYER_PRIVATE_KEY not set — cannot make payments.";
-  }
+  const { account, mode } = resolveWallet();
+  console.log(`[agent-buyer] Using ${mode} wallet: ${account.address}`);
 
-  const wallet = AccountWallet.fromPrivateKey(BUYER_PRIVATE_KEY as `0x${string}`);
+  const wallet = new AccountWallet(account);
   const treasurer = new NaiveTreasurer(wallet);
 
   const client = new Client(
-    { name: "agentcore-buyer", version: "1.0.0" },
+    { name: "agentcore-buyer", version: "2.0.0" },
     { mcpOptions: { capabilities: {} }, treasurer },
   );
 
@@ -79,7 +96,7 @@ async function callSellerTool(
 }
 
 // ---------------------------------------------------------------------------
-// Tool mapping: the AgentCore agent decides which seller tool to call
+// Intent routing
 // ---------------------------------------------------------------------------
 
 function parseIntent(prompt: string): {
@@ -113,7 +130,6 @@ function parseIntent(prompt: string): {
     };
   }
 
-  // Default: research
   return {
     tool: "research_topic",
     args: { topic: prompt, depth: "brief" },
@@ -145,4 +161,4 @@ const app = new BedrockAgentCoreApp({
 
 app.run();
 
-console.log("[agent-buyer] AgentCore app started on port 8080");
+console.log("[agent-buyer] AgentCore app started — seller tools powered by ClawRouter via x402");

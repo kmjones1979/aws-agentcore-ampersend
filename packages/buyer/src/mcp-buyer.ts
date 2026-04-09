@@ -1,60 +1,73 @@
 /**
- * Ampersend MCP Buyer — production pattern with spend limits.
+ * Ampersend MCP Buyer — production pattern with AgentCore wallet + spend limits.
  *
- * Uses createAmpersendMcpClient with AmpersendTreasurer which
- * authorizes payments through the Ampersend API before signing.
- * Requires a smart account set up via `ampersend setup`.
+ * Uses the AgentCore wallet provider for credential management, combined
+ * with the AmpersendTreasurer for API-authorized, spend-limited payments.
+ *
+ * In production, the CDP wallet credentials would be stored in
+ * AWS Secrets Manager and retrieved just-in-time by the AgentCore runtime.
  *
  * Usage:
- *   BUYER_SMART_ACCOUNT_ADDRESS=0x... \
- *   BUYER_SESSION_KEY_PRIVATE_KEY=0x... \
+ *   CDP_API_KEY_ID=... \
+ *   CDP_API_KEY_SECRET=... \
  *   pnpm --filter @poc/buyer mcp
  */
 import "dotenv/config";
-import { createAmpersendMcpClient } from "@ampersend_ai/ampersend-sdk";
-import { StreamableHTTPClientTransport } from "@ampersend_ai/ampersend-sdk/mcp/client";
-import type { Address, Hex } from "viem";
+import { createAmpersendTreasurer } from "@ampersend_ai/ampersend-sdk";
+import {
+  Client,
+  StreamableHTTPClientTransport,
+} from "@ampersend_ai/ampersend-sdk/mcp/client";
+import { createAgentCoreWallet } from "./agentcore-wallet.js";
 
 const SELLER_URL = process.env.SELLER_URL ?? "http://localhost:8000/mcp";
 
 async function main() {
-  const smartAccountAddress = process.env.BUYER_SMART_ACCOUNT_ADDRESS as
-    | Address
-    | undefined;
-  const sessionKeyPrivateKey = process.env.BUYER_SESSION_KEY_PRIVATE_KEY as
-    | Hex
-    | undefined;
-
-  if (!smartAccountAddress || !sessionKeyPrivateKey) {
-    console.error(
-      "Set BUYER_SMART_ACCOUNT_ADDRESS and BUYER_SESSION_KEY_PRIVATE_KEY in .env",
-    );
-    process.exit(1);
-  }
+  const walletProvider = await createAgentCoreWallet();
+  const address = walletProvider.getAddress();
 
   console.log(`[mcp-buyer] Connecting to seller at ${SELLER_URL}`);
-  console.log(`[mcp-buyer] Smart account: ${smartAccountAddress}`);
+  console.log(`[mcp-buyer] AgentCore wallet: ${address} (${walletProvider.getMode()} mode)`);
 
-  const client = createAmpersendMcpClient({
-    clientInfo: { name: "mcp-buyer", version: "1.0.0" },
-    smartAccountAddress,
-    sessionKeyPrivateKey,
-    apiUrl: process.env.AMPERSEND_API_URL ?? "https://api.ampersend.ai",
-    chainId: process.env.CHAIN_NETWORK === "base" ? 8453 : 84532,
-  });
+  // Create AmpersendTreasurer using the AgentCore wallet's underlying key.
+  // In production, the smart account would be provisioned via the Ampersend
+  // setup flow tied to the CDP wallet address.
+  const smartAccountAddress =
+    process.env.BUYER_SMART_ACCOUNT_ADDRESS ?? address;
+  const sessionKeyPrivateKey =
+    process.env.BUYER_SESSION_KEY_PRIVATE_KEY;
+
+  let treasurer;
+  if (smartAccountAddress && sessionKeyPrivateKey) {
+    treasurer = createAmpersendTreasurer({
+      smartAccountAddress: smartAccountAddress as `0x${string}`,
+      sessionKeyPrivateKey: sessionKeyPrivateKey as `0x${string}`,
+      apiUrl: process.env.AMPERSEND_API_URL ?? "https://api.ampersend.ai",
+      chainId: process.env.CHAIN_NETWORK === "base" ? 8453 : 84532,
+    });
+    console.log("[mcp-buyer] Using AmpersendTreasurer (spend-limited)");
+  } else {
+    console.log(
+      "[mcp-buyer] No smart account configured — falling back to NaiveTreasurer",
+    );
+    treasurer = walletProvider.createNaiveTreasurer();
+  }
+
+  const client = new Client(
+    { name: "mcp-buyer", version: "2.0.0" },
+    { mcpOptions: { capabilities: {} }, treasurer },
+  );
 
   const transport = new StreamableHTTPClientTransport(new URL(SELLER_URL));
   await client.connect(transport);
-  console.log("[mcp-buyer] Connected (AmpersendTreasurer)\n");
+  console.log("[mcp-buyer] Connected\n");
 
-  // List tools
   const { tools } = await client.listTools();
   console.log(
     "[mcp-buyer] Available tools:",
     tools.map((t) => t.name),
   );
 
-  // Call research_topic — treasurer will check spend limits before paying
   console.log("\n--- Calling research_topic (spend-limited) ---");
   try {
     const result = await client.callTool({
@@ -67,7 +80,6 @@ async function main() {
     console.error("[mcp-buyer] Error (may be spend limit):", msg);
   }
 
-  // Call generate_code
   console.log("\n--- Calling generate_code (spend-limited) ---");
   try {
     const result = await client.callTool({
