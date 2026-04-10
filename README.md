@@ -87,89 +87,110 @@ flowchart TB
 
 ---
 
-## Setup and testing
+## Quick start
 
-### Prerequisites
+> **Prerequisites:** Node.js 20+ and pnpm. Docker only if you build the AgentBuyer container.
 
-- **Node.js 20+** and **pnpm** (see root `package.json` → `packageManager`)
-- **USDC** on the right chain for **buyer** (tool leg) and **BlockRun EOA** (mainnet leg); see below
-- **Docker** — only if you build the AgentBuyer container
-
-### 1. Install and env
+### 1. Clone and install
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/kmjones1979/aws-agentcore-ampersend.git
 cd aws-agentcore-ampersend
 pnpm install
 cp .env.example .env
 ```
 
-Edit **`.env`** at the **repository root** (all scripts load it from there). Minimum for a local run:
+### 2. Configure `.env`
 
-| Goal | Set |
-|------|-----|
-| Buyer signs tools | **`BUYER_PRIVATE_KEY`** *or* full **CDP** (`CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, `CDP_WALLET_SECRET`) |
-| Seller receives tool payments | **`SELLER_WALLET_ADDRESS`** |
-| BlockRun LLM calls | **`SELLER_PRIVATE_KEY`** (EOA that pays BlockRun) *or* **`SELLER_BLOCKRUN_PRIVATE_KEY`** if you split keys |
-| Model id | **`CLAWROUTER_MODEL`** (e.g. `claude-haiku-4.5`) |
-| Network for buyer↔seller | **`CHAIN_NETWORK`** — `base-sepolia` (testnet) or `base` (mainnet real USDC) |
+Open `.env` and fill in these four values:
 
-BlockRun's settlement in this flow uses **Base mainnet** USDC. Fund the **address derived from `SELLER_PRIVATE_KEY` / `SELLER_BLOCKRUN_PRIVATE_KEY`** on [Base mainnet USDC](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913).
+```bash
+BUYER_PRIVATE_KEY=0x...          # EOA that pays for tool calls (needs USDC)
+SELLER_WALLET_ADDRESS=0x...      # Address that receives tool USDC payments
+SELLER_PRIVATE_KEY=0x...         # EOA that pays BlockRun + signs settlement (needs USDC + ETH)
+CHAIN_NETWORK=base               # "base" for mainnet, "base-sepolia" for testnet
+```
 
-### 2. Fund wallets
+Optionally set `CLAWROUTER_MODEL` (defaults to `claude-haiku-4.5`).
 
-- **Tool leg (buyer):** Fund the **buyer** (CDP address or `BUYER_PRIVATE_KEY` EOA) with **USDC** on the chain **`CHAIN_NETWORK`** points to.
-- **Tool leg (facilitator gas):** The seller's local facilitator submits `transferWithAuthorization` on-chain; this costs gas. Fund the **`SELLER_PRIVATE_KEY`** (or **`SELLER_BLOCKRUN_PRIVATE_KEY`**) EOA with a small amount of **ETH** on the **`CHAIN_NETWORK`** chain. A convenience script is included:
+### 3. Fund wallets
+
+Three things need funding on the `CHAIN_NETWORK` chain:
+
+| What | Token | Where |
+|------|-------|-------|
+| Buyer EOA (`BUYER_PRIVATE_KEY`) | **USDC** | Pays for tool calls (0.01–0.02 USDC each) |
+| Seller EOA (`SELLER_PRIVATE_KEY`) | **ETH** | Gas for on-chain settlement (~0.0003 ETH is plenty) |
+| Seller EOA (`SELLER_PRIVATE_KEY`) | **Base mainnet USDC** | Pays BlockRun for LLM calls |
+
+A helper script sends gas ETH from the buyer to the seller EOA:
 
 ```bash
 pnpm --filter @poc/buyer exec tsx ../../scripts/fund-facilitator.ts
 ```
 
-This sends **0.0003 ETH** from the buyer wallet to the facilitator signer (enough for hundreds of settlements on Base).
-
-- **BlockRun leg:** Fund the **BlockRun EOA** (from seller keys above) with **Base mainnet USDC**. Without balance here, tools return **`PAYMENT_INVALID`** from BlockRun even when MCP x402 succeeds.
-
-### 3. Run the seller
+### 4. Start the seller (Terminal 1)
 
 ```bash
 pnpm seller:dev
 ```
 
-Expect: **`[seller] Local x402 facilitator ready`**, **`[seller] FastMCP server listening on http://localhost:8000/mcp`**, and the tool list in logs.
+You should see:
 
-### 4. Run a buyer (integration test)
+```
+[seller] Local x402 facilitator ready (signer: 0x..., network: base)
+[seller] FastMCP server listening on http://localhost:8000/mcp
+[seller] Tools: research_topic, summarize_text, generate_code
+```
 
-In a **second** terminal:
+### 5. Run the buyer (Terminal 2)
 
 ```bash
 pnpm buyer:naive
 ```
 
-**Success:** For each tool, logs show **`[agentcore-wallet] Payment …: sending`** then **`accepted`**, and JSON results include a real settlement with **transaction hash**:
+Each tool call will:
+1. Sign an EIP-3009 payment authorization
+2. Verify and settle USDC on-chain to `SELLER_WALLET_ADDRESS`
+3. Call BlockRun for the LLM response
+
+**Success looks like:**
+
+```
+[agentcore-wallet] Payment ...: sending
+[agentcore-wallet] Payment ...: accepted
+```
+
+Each result includes a real transaction hash:
 
 ```json
 "_meta": {
   "x402/payment-response": {
     "success": true,
-    "transaction": "0x565aa01f...",
+    "transaction": "0x2aa13a14...",
     "network": "base",
     "payer": "0x717520C8..."
   }
 }
 ```
 
-The seller logs show **`settled ✓ tx: 0x...`** for each tool call. Verify on BaseScan under the payee's [token transfers](https://basescan.org/address/<SELLER_WALLET_ADDRESS>#tokentxns).
-
-### 5. Optional checks
+### 6. Verify on-chain
 
 ```bash
-pnpm recent-txs    # BaseScan links for env addresses (after activity)
-pnpm web:dev       # Dashboard at http://localhost:3000 (builds @poc/buyer first)
+pnpm recent-txs
 ```
 
-**Dashboard:** Patterns **naive** / **ampersend** use `POST /api/invoke` with the same wallet path as `pnpm buyer:naive`. Pattern **proxy** needs **`pnpm buyer:proxy`** and matching **`PROXY_URL`**.
+This prints BaseScan links for all env wallets. Or check the payee directly:
 
-**Full compile:** `pnpm -r build` (seller, buyer, web, AgentBuyer).
+`https://basescan.org/address/<SELLER_WALLET_ADDRESS>#tokentxns`
+
+### Optional: Web dashboard
+
+```bash
+pnpm web:dev       # http://localhost:3000
+```
+
+Uses the same wallet path as `pnpm buyer:naive`. The **proxy** pattern needs `pnpm buyer:proxy` running with a matching `PROXY_URL`.
 
 ---
 
