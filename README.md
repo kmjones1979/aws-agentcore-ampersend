@@ -24,6 +24,7 @@ TypeScript monorepo that wires four pieces together:
 - [AgentCore wallet (CDP + Ampersend)](#agentcore-wallet-cdp--ampersend)
 - [AgentCore container & deployment](#agentcore-container--deployment)
 - [Testing on Base mainnet](#testing-on-base-mainnet)
+- [Testing results (reference run)](#testing-results-reference-run)
 - [Testing & troubleshooting](#testing--troubleshooting)
 - [Project structure](#project-structure)
 - [Technologies](#technologies)
@@ -248,6 +249,36 @@ This uses **real USDC on Base** for tool payments and for BlockRun. Double-check
 6. Run the same flow as [Quick start](#quick-start): **`pnpm seller:dev`**, then **`pnpm buyer:naive`** (or **`pnpm web:dev`**).
 
 If anything still references Sepolia, ensure no stale **`CHAIN_NETWORK`** in the shell and that only one **`.env`** is loaded (repo root).
+
+---
+
+## Testing results (reference run)
+
+The table below records a **full local validation** on **2026-04-10**: compile all workspace packages, then MCP **buyer → seller → BlockRun** via `pnpm buyer:naive` with **`pnpm seller:dev`** already listening on port **8000**. Your machine will differ slightly (timings, log wording); re-run the same commands to reproduce.
+
+### Commands and outcomes
+
+| Step | Command | Outcome |
+|------|---------|---------|
+| 1 | `pnpm -r build` | **Pass** — TypeScript / Next builds for `packages/seller`, `packages/buyer`, `packages/web`, `app/AgentBuyer` |
+| 2 | `pnpm seller:dev` (terminal A) | **Pass** — FastMCP at `http://localhost:8000/mcp`, tools `research_topic`, `summarize_text`, `generate_code` |
+| 3 | `pnpm buyer:naive` (terminal B) | **Pass** — MCP connect; for each tool, x402 **`sending` → `accepted`**; tool payloads returned model text (no `isError`) |
+
+**What you should see in the buyer log:** lines like `[agentcore-wallet] Payment <uuid>: sending` then `accepted`, and JSON results with `"x402/payment-response": { "success": true }` under `_meta`.
+
+### On-chain activity and transaction hashes
+
+The CLI **does not print L2 transaction hashes** today—it logs **Ampersend payment authorization IDs** (UUIDs), e.g. `818587d2-2ec2-4cf8-bd9b-e9680169ffbe`. To inspect **actual USDC transfers** and **tx hashes**, use a **Base** block explorer and search by **address** (or token transfers in a time window):
+
+| Role | Address source | Explorer (pick network to match `CHAIN_NETWORK`) |
+|------|----------------|--------------------------------------------------|
+| Tool buyer (pays seller) | From `BUYER_PRIVATE_KEY` or your CDP account | [Base mainnet](https://basescan.org/) — `https://basescan.org/address/<0x…>` · [Base Sepolia](https://sepolia.basescan.org/) — `https://sepolia.basescan.org/address/<0x…>` |
+| Seller receives tool fees | `SELLER_WALLET_ADDRESS` | Same as above |
+| Seller pays BlockRun (LLM) | Address from `SELLER_PRIVATE_KEY` | **Base mainnet** [basescan.org](https://basescan.org/) (BlockRun settlement in this POC) |
+
+**USDC (Base mainnet) token page** (for transfer lists): [USDC on Base](https://basescan.org/address/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913).
+
+After a test run, open the **address** pages above and use **Latest Transfers** / **ERC-20** tabs; each row links to a **transaction hash** you can copy or share.
 
 ---
 
