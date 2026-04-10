@@ -2,8 +2,13 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { config as loadEnv } from "dotenv";
 import { BedrockAgentCoreApp } from "bedrock-agentcore/runtime";
+import {
+  Client,
+  StreamableHTTPClientTransport,
+} from "@ampersend_ai/ampersend-sdk/mcp/client";
+import { createAgentCoreWallet } from "@poc/buyer/agentcore-wallet";
 
-/** Walk up from this file (src/ or dist/) to find repo-root `.env` for local runs. */
+/** Walk up from this file to find repo-root `.env` for local runs. */
 function loadRepoDotenv(): void {
   let dir = import.meta.dirname;
   for (let i = 0; i < 6; i++) {
@@ -18,85 +23,22 @@ function loadRepoDotenv(): void {
   }
 }
 loadRepoDotenv();
-import {
-  Client,
-  StreamableHTTPClientTransport,
-} from "@ampersend_ai/ampersend-sdk/mcp/client";
-import {
-  AccountWallet,
-  type X402Treasurer,
-  type Authorization,
-  type PaymentContext,
-  type PaymentStatus,
-} from "@ampersend_ai/ampersend-sdk/x402";
-import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
-import { keccak256, toBytes, type Hex, type LocalAccount } from "viem";
-
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
 
 const SELLER_URL = process.env.SELLER_URL ?? "http://localhost:8000/mcp";
-
-// ---------------------------------------------------------------------------
-// AgentCore wallet provider (embedded — same pattern as packages/buyer)
-// ---------------------------------------------------------------------------
-
-function resolveWallet(): { account: LocalAccount; mode: string } {
-  const cdpKeyId = process.env.CDP_API_KEY_ID;
-  const cdpKeySecret = process.env.CDP_API_KEY_SECRET;
-  const rawKey = process.env.BUYER_PRIVATE_KEY as Hex | undefined;
-
-  if (cdpKeyId && cdpKeySecret) {
-    const seed = keccak256(toBytes(`${cdpKeyId}:${cdpKeySecret}`));
-    return { account: privateKeyToAccount(seed), mode: "cdp" };
-  }
-
-  if (rawKey) {
-    return { account: privateKeyToAccount(rawKey), mode: "local" };
-  }
-
-  return { account: privateKeyToAccount(generatePrivateKey()), mode: "ephemeral" };
-}
-
-class NaiveTreasurer implements X402Treasurer {
-  constructor(private wallet: InstanceType<typeof AccountWallet>) {}
-
-  async onPaymentRequired(
-    requirements: ReadonlyArray<any>,
-    _context?: PaymentContext,
-  ): Promise<Authorization | null> {
-    if (requirements.length === 0) return null;
-    const payment = await this.wallet.createPayment(requirements[0]);
-    return { payment, authorizationId: crypto.randomUUID() };
-  }
-
-  async onStatus(
-    status: PaymentStatus,
-    authorization: Authorization,
-  ): Promise<void> {
-    console.log(
-      `[agent-buyer] Payment ${authorization.authorizationId}: ${status}`,
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// MCP client helper
-// ---------------------------------------------------------------------------
 
 async function callSellerTool(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<string> {
-  const { account, mode } = resolveWallet();
-  console.log(`[agent-buyer] Using ${mode} wallet: ${account.address}`);
+  const walletProvider = await createAgentCoreWallet();
+  console.log(
+    `[agent-buyer] Wallet ${walletProvider.getAddress()} (${walletProvider.getMode()} mode)`,
+  );
 
-  const wallet = new AccountWallet(account);
-  const treasurer = new NaiveTreasurer(wallet);
+  const treasurer = walletProvider.createNaiveTreasurer();
 
   const client = new Client(
-    { name: "agentcore-buyer", version: "2.0.0" },
+    { name: "agentcore-buyer", version: "2.1.0" },
     { mcpOptions: { capabilities: {} }, treasurer },
   );
 
@@ -105,18 +47,14 @@ async function callSellerTool(
 
   try {
     const result = await client.callTool({ name: toolName, arguments: args });
-    const text = (result as any).content
-      ?.map((c: { text?: string }) => c.text ?? "")
+    const text = (result as { content?: Array<{ text?: string }> }).content
+      ?.map((c) => c.text ?? "")
       .join("\n");
     return text ?? JSON.stringify(result);
   } finally {
     await client.close();
   }
 }
-
-// ---------------------------------------------------------------------------
-// Intent routing
-// ---------------------------------------------------------------------------
 
 function parseIntent(prompt: string): {
   tool: string;
@@ -155,10 +93,6 @@ function parseIntent(prompt: string): {
   };
 }
 
-// ---------------------------------------------------------------------------
-// AgentCore entrypoint
-// ---------------------------------------------------------------------------
-
 const app = new BedrockAgentCoreApp({
   invocationHandler: {
     process: async (payload, context) => {
@@ -181,5 +115,5 @@ const app = new BedrockAgentCoreApp({
 app.run();
 
 console.log(
-  "[agent-buyer] AgentCore app started — invokes paid MCP tools on SELLER_URL (seller may use ClawRouter internally)",
+  "[agent-buyer] AgentCore app started — paid MCP tools via AgentCore wallet (CDP or BUYER_PRIVATE_KEY)",
 );

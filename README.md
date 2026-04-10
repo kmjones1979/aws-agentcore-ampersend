@@ -89,11 +89,12 @@ cp .env.example .env
 Edit `.env`:
 
 ```bash
-# Option A: CDP wallet (production)
+# Option A: CDP (production) — all three required for AgentKit
 CDP_API_KEY_ID=your-key-id
 CDP_API_KEY_SECRET=your-key-secret
+CDP_WALLET_SECRET=your-wallet-secret
 
-# Option B: Raw private key (testing)
+# Option B: Raw private key (testing, no CDP)
 BUYER_PRIVATE_KEY=0x...
 
 # Seller config
@@ -132,25 +133,24 @@ pnpm web:dev
 
 ## AgentCore Wallet Provider
 
-The `AgentCoreWalletProvider` (`packages/buyer/src/agentcore-wallet.ts`) follows the AWS sample pattern:
+The `AgentCoreWalletProvider` (`packages/buyer/src/agentcore-wallet.ts`) integrates **Coinbase AgentKit** [`CdpEvmWalletProvider`](https://github.com/coinbase/agentkit) when CDP credentials are present, and bridges it to a viem `LocalAccount` via `toAccount` so Ampersend’s `AccountWallet` can call `x402`’s `createPaymentHeader` (see `packages/buyer/src/cdp-viem-account.ts`).
 
 ```typescript
 import { createAgentCoreWallet } from "./agentcore-wallet.js";
 
-// Automatically resolves credentials:
-// 1. CDP_API_KEY_ID + CDP_API_KEY_SECRET → CDP managed wallet
-// 2. BUYER_PRIVATE_KEY → local testing wallet
+// 1. CDP_API_KEY_ID + CDP_API_KEY_SECRET + CDP_WALLET_SECRET → real CDP server wallet (mode "cdp")
+// 2. BUYER_PRIVATE_KEY → local EOA (mode "local")
 // 3. Neither → ephemeral wallet (unfunded)
 const wallet = await createAgentCoreWallet();
 
-// Get address and treasurer
-console.log(wallet.getAddress());          // 0x...
-console.log(wallet.getMode());             // "cdp" | "local"
+console.log(wallet.getAddress());   // 0x...
+console.log(wallet.getMode());      // "cdp" | "local"
+wallet.getCdpProvider();            // CdpEvmWalletProvider | null (CDP only)
 
-const treasurer = wallet.createNaiveTreasurer();  // for x402 payments
+const treasurer = wallet.createNaiveTreasurer();
 ```
 
-In production, CDP credentials would be stored in **AWS Secrets Manager** and retrieved just-in-time by the AgentCore runtime.
+In production, store **CDP_API_KEY_ID**, **CDP_API_KEY_SECRET**, and **CDP_WALLET_SECRET** in **AWS Secrets Manager** (or inject via AgentCore environment) — never commit them.
 
 ## AgentCore container agent (`app/AgentBuyer`)
 
@@ -161,13 +161,19 @@ The **runtime wiring is correct** for a bring-your-own-container agent: `Bedrock
 | Item | Status |
 |------|--------|
 | `BedrockAgentCoreApp` + `invocationHandler.process` | Correct |
-| Wallet resolution (`BUYER_PRIVATE_KEY` or CDP env vars) | Same stub pattern as `packages/buyer` — **not** the real Coinbase AgentKit SDK; CDP mode derives a deterministic key from API key strings for POC only |
+| Wallet resolution | **CDP:** `CDP_API_KEY_ID` + `CDP_API_KEY_SECRET` + `CDP_WALLET_SECRET` → AgentKit `CdpEvmWalletProvider` (real server-side signing). **Fallback:** `BUYER_PRIVATE_KEY` for local EOA. `app/AgentBuyer` imports `createAgentCoreWallet` from `@poc/buyer/agentcore-wallet`. |
 | **`SELLER_URL`** | **Required.** Defaults to `http://localhost:8000/mcp`, which only works on your laptop. In AgentCore, set this to a **publicly reachable** seller URL (HTTPS, correct path). The agent cannot reach `localhost` inside the container. |
-| Secrets | Prefer **runtime environment** or **Secrets Manager** for `BUYER_PRIVATE_KEY` — do not bake keys into the image. |
+| Secrets | Prefer **Secrets Manager** / runtime env for **CDP** vars or `BUYER_PRIVATE_KEY`; do not bake into the image. |
 | `agentcore/agentcore.json` shows `PYTHON_3_12` / `main.py` | **Normal for container agents.** AWS documents that for `build: Container`, those fields are placeholders; the **Dockerfile `CMD`** is what actually runs ([TypeScript container guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-cli-typescript.html)). |
 | New MCP connection per invocation | Fine for a POC; reuse a client if you need higher throughput. |
 
 Local run (optional): `agent.ts` walks up parent directories and loads the first `.env` found (usually the repo root). In AgentCore, environment variables are injected by the platform instead.
+
+**Container image:** build from the **repository root** (workspace packages required):
+
+```bash
+docker build -f app/AgentBuyer/Dockerfile .
+```
 
 ## ClawRouter Integration
 
@@ -209,7 +215,7 @@ aws-agentcore-ampersend/
 - [Ampersend SDK](https://github.com/edgeandnode/ampersend-sdk) — x402 payment protocol
 - [ClawRouter](https://github.com/edgeandnode/ClawRouter) — Smart LLM routing (41+ models)
 - [x402](https://github.com/coinbase/x402) — Micropayment protocol (USDC)
-- [Coinbase CDP](https://docs.cdp.coinbase.com/) — Wallet management
+- [Coinbase CDP](https://docs.cdp.coinbase.com/) + [AgentKit](https://docs.cdp.coinbase.com/agent-kit/docs/welcome) — Buyer wallet (`CdpEvmWalletProvider`)
 - [Next.js](https://nextjs.org) + [Tailwind CSS](https://tailwindcss.com) — Dashboard
 
 ## License

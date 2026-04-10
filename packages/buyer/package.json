@@ -3,6 +3,9 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
+  "exports": {
+    "./agentcore-wallet": "./src/agentcore-wallet.ts"
+  },
   "scripts": {
     "naive": "tsx src/naive-buyer.ts",
     "mcp": "tsx src/mcp-buyer.ts",
@@ -13,6 +16,7 @@
   },
   "dependencies": {
     "@ampersend_ai/ampersend-sdk": "^0.0.16",
+    "@coinbase/agentkit": "^0.10.4",
     "@modelcontextprotocol/sdk": "^1.20.0",
     "@x402/core": "^2.5.0",
     "@x402/fetch": "^2.5.0",
