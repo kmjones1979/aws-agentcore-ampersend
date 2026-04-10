@@ -34,6 +34,7 @@ flowchart TB
   subgraph leg1 [Leg 1 — Tool x402]
     W[AccountWallet + Treasurer]
     MCP[FastMCP seller :8000]
+    FAC[Local x402Facilitator]
     PAYEE[SELLER_WALLET_ADDRESS]
   end
 
@@ -44,8 +45,9 @@ flowchart TB
 
   NB --> W
   AC --> W
-  W -->|x402 USDC| MCP
-  MCP --> PAYEE
+  W -->|EIP-3009 signed auth| MCP
+  MCP -->|verify + settle| FAC
+  FAC -->|transferWithAuthorization| PAYEE
   MCP -->|invoke tool| CR
   CR -->|HTTP 402 + EIP-712 EOA| BR
 ```
@@ -53,9 +55,10 @@ flowchart TB
 | Step | What happens |
 |------|----------------|
 | 1 | Client uses **`createAgentCoreWallet()`** (CDP or `BUYER_PRIVATE_KEY` EOA) and a **treasurer** (`createNaiveTreasurer` or optional Ampersend API treasurer). |
-| 2 | **MCP** connects to the **seller** (`withX402Payment`). The buyer signs x402 for **USDC** to **`SELLER_WALLET_ADDRESS`** (per `CHAIN_NETWORK`: Base Sepolia or Base mainnet). |
-| 3 | Tool handlers call **`askClawRouter()`** in `packages/seller/src/clawrouter.ts`, which talks to **BlockRun** over HTTPS. |
-| 4 | BlockRun returns **402 Payment Required**; the seller signs with a **separate funded EOA** ([ClawRouter-style](https://github.com/edgeandnode/ClawRouter/blob/main/src/x402.ts) **`signTypedData`**, x402 v2) using **`SELLER_BLOCKRUN_PRIVATE_KEY`** or **`SELLER_PRIVATE_KEY`**. BlockRun settles on **Base mainnet** USDC only for that leg. |
+| 2 | **MCP** connects to the **seller** (`withX402Payment`). The buyer signs an **EIP-3009 `transferWithAuthorization`** for **USDC** to **`SELLER_WALLET_ADDRESS`** (per `CHAIN_NETWORK`: Base Sepolia or Base mainnet). |
+| 3 | The seller's **local `x402Facilitator`** (`@x402/evm ExactEvmSchemeV1`) **verifies** the buyer's signature on-chain, then **settles** by submitting `transferWithAuthorization` to the USDC contract. USDC moves from buyer to payee. The facilitator signer (`SELLER_PRIVATE_KEY`) pays gas (ETH). |
+| 4 | Tool handlers call **`askClawRouter()`** in `packages/seller/src/clawrouter.ts`, which talks to **BlockRun** over HTTPS. |
+| 5 | BlockRun returns **402 Payment Required**; the seller signs with a **separate funded EOA** ([ClawRouter-style](https://github.com/edgeandnode/ClawRouter/blob/main/src/x402.ts) **`signTypedData`**, x402 v2) using **`SELLER_BLOCKRUN_PRIVATE_KEY`** or **`SELLER_PRIVATE_KEY`**. BlockRun settles on **Base mainnet** USDC only for that leg. |
 
 ---
 
@@ -80,7 +83,7 @@ flowchart TB
 ### BlockRun
 
 - **Role:** Paid **OpenAI-compatible** API at `https://blockrun.ai/api` (e.g. `/v1/chat/completions`), gated by **x402**.
-- **In this repo:** `packages/seller/src/clawrouter.ts` implements the same **EOA EIP-712** pattern as [ClawRouter `x402.ts`](https://github.com/edgeandnode/ClawRouter/blob/main/src/x402.ts). **Ampersend `SmartAccountWallet` / ERC-1271** payloads are **not** compatible with BlockRun’s on-chain verifier—use a **funded EOA** for the BlockRun leg.
+- **In this repo:** `packages/seller/src/clawrouter.ts` implements the same **EOA EIP-712** pattern as [ClawRouter `x402.ts`](https://github.com/edgeandnode/ClawRouter/blob/main/src/x402.ts). **Ampersend `SmartAccountWallet` / ERC-1271** payloads are **not** compatible with BlockRun's on-chain verifier—use a **funded EOA** for the BlockRun leg.
 
 ---
 
@@ -111,11 +114,19 @@ Edit **`.env`** at the **repository root** (all scripts load it from there). Min
 | Model id | **`CLAWROUTER_MODEL`** (e.g. `claude-haiku-4.5`) |
 | Network for buyer↔seller | **`CHAIN_NETWORK`** — `base-sepolia` (testnet) or `base` (mainnet real USDC) |
 
-BlockRun’s settlement in this flow uses **Base mainnet** USDC. Fund the **address derived from `SELLER_PRIVATE_KEY` / `SELLER_BLOCKRUN_PRIVATE_KEY`** on [Base mainnet USDC](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913).
+BlockRun's settlement in this flow uses **Base mainnet** USDC. Fund the **address derived from `SELLER_PRIVATE_KEY` / `SELLER_BLOCKRUN_PRIVATE_KEY`** on [Base mainnet USDC](https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913).
 
 ### 2. Fund wallets
 
-- **Tool leg:** Fund the **buyer** (CDP address or `BUYER_PRIVATE_KEY` EOA) with **USDC** on the chain **`CHAIN_NETWORK`** points to.
+- **Tool leg (buyer):** Fund the **buyer** (CDP address or `BUYER_PRIVATE_KEY` EOA) with **USDC** on the chain **`CHAIN_NETWORK`** points to.
+- **Tool leg (facilitator gas):** The seller's local facilitator submits `transferWithAuthorization` on-chain; this costs gas. Fund the **`SELLER_PRIVATE_KEY`** (or **`SELLER_BLOCKRUN_PRIVATE_KEY`**) EOA with a small amount of **ETH** on the **`CHAIN_NETWORK`** chain. A convenience script is included:
+
+```bash
+pnpm --filter @poc/buyer exec tsx ../../scripts/fund-facilitator.ts
+```
+
+This sends **0.0003 ETH** from the buyer wallet to the facilitator signer (enough for hundreds of settlements on Base).
+
 - **BlockRun leg:** Fund the **BlockRun EOA** (from seller keys above) with **Base mainnet USDC**. Without balance here, tools return **`PAYMENT_INVALID`** from BlockRun even when MCP x402 succeeds.
 
 ### 3. Run the seller
@@ -124,7 +135,7 @@ BlockRun’s settlement in this flow uses **Base mainnet** USDC. Fund the **addr
 pnpm seller:dev
 ```
 
-Expect: **`[seller] FastMCP server listening on http://localhost:8000/mcp`** and tool list in logs.
+Expect: **`[seller] Local x402 facilitator ready`**, **`[seller] FastMCP server listening on http://localhost:8000/mcp`**, and the tool list in logs.
 
 ### 4. Run a buyer (integration test)
 
@@ -134,7 +145,20 @@ In a **second** terminal:
 pnpm buyer:naive
 ```
 
-**Success:** For each tool, logs show **`[agentcore-wallet] Payment …: sending`** then **`accepted`**, and JSON results include **`"_meta": { "x402/payment-response": { "success": true } }`** and model text in **`content`**, not `isError`.
+**Success:** For each tool, logs show **`[agentcore-wallet] Payment …: sending`** then **`accepted`**, and JSON results include a real settlement with **transaction hash**:
+
+```json
+"_meta": {
+  "x402/payment-response": {
+    "success": true,
+    "transaction": "0x565aa01f...",
+    "network": "base",
+    "payer": "0x717520C8..."
+  }
+}
+```
+
+The seller logs show **`settled ✓ tx: 0x...`** for each tool call. Verify on BaseScan under the payee's [token transfers](https://basescan.org/address/<SELLER_WALLET_ADDRESS>#tokentxns).
 
 ### 5. Optional checks
 
@@ -157,8 +181,8 @@ pnpm web:dev       # Dashboard at http://localhost:3000 (builds @poc/buyer first
 | `CDP_WALLET_ADDRESS` | Optional fixed CDP EVM address |
 | `BUYER_PRIVATE_KEY` | Local EOA when not using full CDP |
 | `SELLER_WALLET_ADDRESS` | Address that **receives** MCP tool x402 payments |
-| `SELLER_PRIVATE_KEY` | **EOA** private key whose address pays **BlockRun** (unless `SELLER_BLOCKRUN_PRIVATE_KEY` is set) |
-| `SELLER_BLOCKRUN_PRIVATE_KEY` | Optional separate EOA **only** for BlockRun |
+| `SELLER_PRIVATE_KEY` | **EOA** private key — used as the **local x402 facilitator signer** (needs ETH for gas on `CHAIN_NETWORK`) and as the **BlockRun payer** (needs Base mainnet USDC), unless `SELLER_BLOCKRUN_PRIVATE_KEY` is set |
+| `SELLER_BLOCKRUN_PRIVATE_KEY` | Optional separate EOA **only** for BlockRun; if set, this key pays BlockRun and also serves as the facilitator signer |
 | `CHAIN_NETWORK` | `base-sepolia` or `base` (buyer↔seller leg) |
 | `CLAWROUTER_MODEL` | BlockRun model id (e.g. `claude-haiku-4.5`) |
 | `SELLER_URL` | Seller MCP URL (default `http://localhost:8000/mcp`; set for AgentCore in AWS) |
@@ -173,7 +197,7 @@ Copy **`.env.example`** as a template; never commit real secrets.
 
 | Script | Description |
 |--------|---------------|
-| `pnpm seller:dev` | FastMCP seller + BlockRun in tools |
+| `pnpm seller:dev` | FastMCP seller + local x402 facilitator + BlockRun in tools |
 | `pnpm buyer:naive` | MCP client: AgentCore wallet + NaiveTreasurer |
 | `pnpm buyer:mcp` | MCP buyer with optional spend-limit treasurer |
 | `pnpm buyer:http` | HTTP x402 sample |
@@ -212,7 +236,11 @@ Production: load CDP secrets from **AWS Secrets Manager** or AgentCore env, not 
 |---------|----------------|
 | MCP 402 / buyer payment fails | Wrong **`CHAIN_NETWORK`** or unfunded **buyer** USDC |
 | **`PAYMENT_INVALID`** / ClawRouter 402 on tool result | **BlockRun EOA** has **no Base mainnet USDC**, or wrong model in **`CLAWROUTER_MODEL`** |
-| BlockRun rejects “smart” signatures | BlockRun expects **ClawRouter EOA EIP-712**; fund the **EOA** from seller keys, not only a smart account |
+| `invalid_exact_evm_missing_eip712_domain` | Requirements missing `extra: { name, version }` — already set in `makeRequirements`; verify USDC EIP-712 domain matches |
+| Settlement fails / facilitator out of gas | **`SELLER_PRIVATE_KEY`** EOA needs **ETH** on `CHAIN_NETWORK` for gas; run `scripts/fund-facilitator.ts` |
+| `No facilitator configured` | Set **`SELLER_PRIVATE_KEY`** or **`SELLER_BLOCKRUN_PRIVATE_KEY`** in `.env` |
+| Payments "accepted" but no on-chain USDC | Seller must show **`[seller] Local x402 facilitator ready`** at startup; if missing, the key is not set |
+| BlockRun rejects "smart" signatures | BlockRun expects **ClawRouter EOA EIP-712**; fund the **EOA** from seller keys, not only a smart account |
 | CDP not used | All three `CDP_*` vars set; remove stray **`BUYER_PRIVATE_KEY`** if you want CDP-only |
 | Web build errors on `@poc/buyer` | Run **`pnpm --filter @poc/buyer build`** |
 
@@ -223,12 +251,14 @@ Production: load CDP secrets from **AWS Secrets Manager** or AgentCore env, not 
 ```
 aws-agentcore-ampersend/
 ├── packages/
-│   ├── seller/src/          # FastMCP, withX402Payment, clawrouter.ts → BlockRun
+│   ├── seller/src/          # FastMCP, x402Facilitator, withX402Payment, clawrouter.ts → BlockRun
 │   ├── buyer/src/           # AgentCore wallet, naive-buyer, mcp-buyer, proxy, http-buyer
 │   └── web/                 # Next.js dashboard, /api/invoke
 ├── app/AgentBuyer/          # BedrockAgentCoreApp + @poc/buyer
 ├── agentcore/               # AgentCore CLI metadata
-├── scripts/recent-tx-links.ts
+├── scripts/
+│   ├── recent-tx-links.ts   # BaseScan links for env wallet addresses
+│   └── fund-facilitator.ts  # Send gas ETH to the facilitator signer
 ├── .env.example
 └── README.md
 ```
@@ -241,7 +271,7 @@ aws-agentcore-ampersend/
 - [Amazon Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/) — runtime; [`bedrock-agentcore`](https://www.npmjs.com/package/bedrock-agentcore)
 - [Ampersend SDK](https://github.com/edgeandnode/ampersend-sdk) — x402 MCP/HTTP
 - [BlockRun](https://blockrun.ai/) — LLM API; [ClawRouter](https://github.com/edgeandnode/ClawRouter) — reference x402 client
-- [x402](https://github.com/coinbase/x402), [Coinbase CDP](https://docs.cdp.coinbase.com/) + [AgentKit](https://docs.cdp.coinbase.com/agent-kit/docs/welcome), [Next.js](https://nextjs.org), [viem](https://viem.sh)
+- [x402](https://github.com/coinbase/x402) ([@x402/core](https://www.npmjs.com/package/@x402/core), [@x402/evm](https://www.npmjs.com/package/@x402/evm) — local facilitator), [Coinbase CDP](https://docs.cdp.coinbase.com/) + [AgentKit](https://docs.cdp.coinbase.com/agent-kit/docs/welcome), [Next.js](https://nextjs.org), [viem](https://viem.sh)
 
 ---
 
