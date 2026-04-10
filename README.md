@@ -47,28 +47,31 @@ TypeScript monorepo that wires four pieces together:
 ## Architecture
 
 ```
-  Next.js dashboard (:3000)  ──POST /api/invoke──►
-        │
-        ▼
-  ┌─────────────────────────────────────────────┐
-  │  Buyer (packages/buyer, packages/web API)  │
-  │  AgentCore agent (app/AgentBuyer)            │
-  │                                               │
-  │  Wallet: CDP (AgentKit) OR BUYER_PRIVATE_KEY │
-  │  NaiveTreasurer → Ampersend MCP / x402       │
-  │  (dashboard “proxy” mode → separate process)│
-  └───────────────────────┬─────────────────────┘
-                          │ x402 (tool payment)
-                          ▼
-  ┌──────────────────────────────────────────────┐
-  │  Seller — FastMCP :8000                       │
-  │  withX402Payment · research / summarize / code│
-  │                    │                          │
-  │                    │ x402 → BlockRun (LLM)    │
-  │                    ▼                          │
-  │       blockrun.ai/api (OpenAI-compatible)    │
-  └──────────────────────────────────────────────┘
+  Layer 1 — where you run the client
+  ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+  │ Amazon Bedrock AgentCore (AWS, optional)  │  Local / dev                                  │
+  │ • AgentCore Runtime · container agent     │  Next :3000 /api/invoke · pnpm buyer:*       │
+  │ • Bedrock: agentcore.json modelProvider   │  buyer:proxy (dashboard)                    │
+  │ • bedrock-agentcore · BedrockAgentCoreApp  │                                               │
+  └────────────────────────────┬──────────────┴───────────────────┬──────────────────────────┘
+                               │                                    │
+                               └──────────────┬─────────────────────┘
+                                              │ MCP + Ampersend x402 (tool payments)
+                                              ▼
+  Layer 2 — Ampersend SDK (buyer → seller tools)
+  ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+  │ Buyers: MCP Client · AccountWallet · treasurers · createAgentCoreWallet (CDP or EOA key) │
+  │ Seller: FastMCP :8000 · withX402Payment                                                  │
+  └─────────────────────────────────────────────────────────────┬───────────────────────────┘
+                                                                │ x402 to BlockRun (LLM)
+                                                                ▼
+  Layer 3 — BlockRun (LLM gateway; separate from Bedrock API in this POC)
+  ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+  │ blockrun.ai · clawrouter.ts · SELLER_PRIVATE_KEY (Base mainnet USDC)                    │
+  └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Legend:** **Amazon Bedrock** is set as **`modelProvider` in `agentcore.json`** alongside **AgentCore Runtime** (see Layer 1). **Ampersend** covers **Layer 2** (MCP + x402 for paid tools). **BlockRun** is **Layer 3** — LLM over x402 via **`clawrouter.ts`**; it is **not** the Bedrock `Converse` API in this sample.
 
 **Two different “buyer” roles:**
 
