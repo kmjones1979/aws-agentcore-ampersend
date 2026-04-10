@@ -265,6 +265,9 @@ async function resolveX402Fetch(): Promise<typeof fetch> {
     console.log(
       `[clawrouter] BlockRun payer (EOA, ClawRouter-compatible): ${account.address}`,
     );
+    console.log(
+      `[clawrouter] BlockRun USDC out (mainnet): https://basescan.org/address/${account.address}#tokentxns`,
+    );
     return createClawRouterStyleFetch(pk);
   })();
 

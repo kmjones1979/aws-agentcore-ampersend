@@ -19,15 +19,63 @@ import {
   Client,
   StreamableHTTPClientTransport,
 } from "@ampersend_ai/ampersend-sdk/mcp/client";
+import { privateKeyToAccount } from "viem/accounts";
+import type { Hex } from "viem";
 import { createAgentCoreWallet } from "./agentcore-wallet.js";
 
 const SELLER_URL = process.env.SELLER_URL ?? "http://localhost:8000/mcp";
+
+function logBuyerAddressAudit(walletAddress: string, mode: "cdp" | "local"): void {
+  const net = process.env.CHAIN_NETWORK ?? "base-sepolia";
+  const explorerBase =
+    net === "base"
+      ? "https://basescan.org/address/"
+      : "https://sepolia.basescan.org/address/";
+  const rawBuyer = process.env.BUYER_PRIVATE_KEY?.trim() as Hex | undefined;
+  let derivedFromEnv: string | undefined;
+  if (rawBuyer) {
+    try {
+      derivedFromEnv = privateKeyToAccount(rawBuyer).address;
+    } catch {
+      derivedFromEnv = undefined;
+    }
+  }
+  console.log(
+    "[naive-buyer] ========== x402 address audit (public only; never log private keys) ==========",
+  );
+  console.log(`[naive-buyer] CHAIN_NETWORK (tool leg): ${net}`);
+  console.log(`[naive-buyer] AgentCore wallet address (x402 payer for tools): ${walletAddress}`);
+  console.log(`[naive-buyer] Wallet mode: ${mode}`);
+  if (derivedFromEnv) {
+    const match =
+      derivedFromEnv.toLowerCase() === walletAddress.toLowerCase()
+        ? "(matches BUYER_PRIVATE_KEY)"
+        : "(differs from BUYER_PRIVATE_KEY — likely CDP or different key)";
+    console.log(`[naive-buyer] BUYER_PRIVATE_KEY → address: ${derivedFromEnv} ${match}`);
+  } else {
+    console.log("[naive-buyer] BUYER_PRIVATE_KEY: not set");
+  }
+  const cdpPin = process.env.CDP_WALLET_ADDRESS?.trim();
+  if (cdpPin) {
+    console.log(`[naive-buyer] CDP_WALLET_ADDRESS (env pin): ${cdpPin}`);
+  }
+  console.log(
+    `[naive-buyer] Explorer — USDC out from payer (tool leg): ${explorerBase}${walletAddress}#tokentxns`,
+  );
+  console.log(
+    "[naive-buyer] Tip: tool payee is SELLER_WALLET_ADDRESS on seller; compare seller startup audit.",
+  );
+  console.log("[naive-buyer] ================================================================");
+}
 
 async function main() {
   console.log(`[naive-buyer] Connecting to seller at ${SELLER_URL}`);
 
   const walletProvider = await createAgentCoreWallet();
-  console.log(`[naive-buyer] Wallet: ${walletProvider.getAddress()} (${walletProvider.getMode()} mode)`);
+  const addr = walletProvider.getAddress();
+  const mode = walletProvider.getMode();
+  console.log(`[naive-buyer] Wallet: ${addr} (${mode} mode)`);
+  logBuyerAddressAudit(addr, mode);
 
   const treasurer = walletProvider.createNaiveTreasurer();
 
