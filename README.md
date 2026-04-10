@@ -1,223 +1,241 @@
 # AgentCore + Ampersend SDK + ClawRouter — Proof of Concept
 
-TypeScript POC combining **AWS Bedrock AgentCore** (agent hosting), **Ampersend SDK** (x402 payment protocol), and **ClawRouter** (smart LLM routing) to demonstrate paid AI agent services with both buyer and seller roles.
+TypeScript POC combining **AWS Bedrock AgentCore** (agent hosting), **Ampersend SDK** (x402 on MCP/HTTP), and **BlockRun / ClawRouter** (`blockrun.ai/api`) for LLM inference behind paid tools.
 
-> **Branch `blockrun-ampersend`**: Uses [ClawRouter](https://github.com/edgeandnode/ClawRouter) (`blockrun.ai/api`) as the LLM backend. The seller pays BlockRun with **x402** using the same **EIP-712 `TransferWithAuthorization`** flow as ClawRouter’s own proxy ([`src/x402.ts`](https://github.com/edgeandnode/ClawRouter/blob/main/src/x402.ts)), implemented with **viem** (`SELLER_PRIVATE_KEY`). Buyer-side tool payments still use **Ampersend SDK** (`withX402Payment`, MCP client, etc.). The [AgentCore wallet pattern](https://github.com/aws-samples/sample-agentcore-cloudfront-x402-payments) (Coinbase CDP or `BUYER_PRIVATE_KEY`) applies to buyers only.
+**Branch `blockrun-ampersend`** extends the base POC with:
+
+- **Seller → LLM:** x402 payments to BlockRun using the same **EIP-712 `TransferWithAuthorization`** pattern as [ClawRouter’s proxy](https://github.com/edgeandnode/ClawRouter/blob/main/src/x402.ts), implemented with **viem** and `SELLER_PRIVATE_KEY` (not Ampersend’s generic HTTP wrapper for that hop).
+- **Buyer → seller:** x402 tool payments via **Ampersend** (`withX402Payment`, MCP client). The buyer wallet is either **Coinbase CDP + AgentKit** (`CdpEvmWalletProvider`) or a **local EOA** (`BUYER_PRIVATE_KEY`), following the [AgentCore x402 sample](https://github.com/aws-samples/sample-agentcore-cloudfront-x402-payments) idea (secrets in prod, env for dev).
+
+---
+
+## Contents
+
+- [Architecture](#architecture)
+- [What this demonstrates](#what-this-demonstrates)
+- [Prerequisites](#prerequisites)
+- [Environment variables](#environment-variables)
+- [Quick start](#quick-start)
+- [Scripts (root)](#scripts-root)
+- [AgentCore wallet (CDP + Ampersend)](#agentcore-wallet-cdp--ampersend)
+- [AgentCore container agent](#agentcore-container-agent)
+- [ClawRouter / BlockRun (seller LLM)](#clawrouter--blockrun-seller-llm)
+- [Testing & troubleshooting](#testing--troubleshooting)
+- [Project structure](#project-structure)
+- [Technologies](#technologies)
+- [License](#license)
+
+---
 
 ## Architecture
 
 ```
-  NextJS Dashboard (:3000)
+  Next.js dashboard (:3000)
         │
         ▼
   ┌─────────────────────────────────────────────┐
-  │          Buyer Patterns                      │
-  │  (AgentCore Wallet — Coinbase CDP)           │
-  │                                              │
-  │  ┌──────────┐ ┌───────────┐ ┌────────────┐  │
-  │  │  Naive    │ │ Ampersend │ │ MCP Proxy  │  │
-  │  │ Treasurer │ │ Treasurer │ │   (:8402)  │  │
-  │  │ (test)    │ │ (prod)    │ │            │  │
-  │  └─────┬────┘ └─────┬─────┘ └──────┬─────┘  │
-  └────────┼─────────────┼──────────────┼─────────┘
-           │             │              │
-           └─────────────┼──────────────┘
-                         │ x402 payment
-                         ▼
-  ┌──────────────────────────────────────────────┐
-  │          Seller Agent (:8000)                 │
-  │  FastMCP + withX402Payment middleware          │
+  │  Buyer (packages/buyer, packages/web API)    │
+  │  AgentCore agent (app/AgentBuyer)            │
   │                                               │
-  │  research_topic   0.01  USDC                  │
-  │  summarize_text   0.005 USDC                  │
-  │  generate_code    0.02  USDC                  │
+  │  Wallet: CDP (AgentKit) OR BUYER_PRIVATE_KEY  │
+  │  Treasurer → Ampersend MCP / x402 client     │
+  └───────────────────────┬─────────────────────┘
+                          │ x402 (tool payment)
+                          ▼
+  ┌──────────────────────────────────────────────┐
+  │  Seller — FastMCP :8000                       │
+  │  withX402Payment · research / summarize / code│
   │                    │                          │
-  │                    │ x402 (EIP-712 USDC, Base) │
+  │                    │ x402 → BlockRun (LLM)    │
   │                    ▼                          │
-  │       ClawRouter (blockrun.ai/api)            │
-  │       OpenAI-compatible chat completions      │
-  └───────────────────────────────────────────────┘
+  │       blockrun.ai/api (OpenAI-compatible)    │
+  └──────────────────────────────────────────────┘
 ```
 
-The seller is **both a seller and a buyer**:
-- Sells AI tools to clients via x402 (**Ampersend** `withX402Payment` on FastMCP)
-- Buys LLM inference from ClawRouter via x402 (**viem** signing; not the ampersend HTTP wrapper)
+**Two different “buyer” roles:**
 
-`SELLER_WALLET_ADDRESS` is where **buyers** send USDC (matches `CHAIN_NETWORK`, usually Base Sepolia). `SELLER_PRIVATE_KEY` must fund **ClawRouter** on **Base mainnet** — the derived address may differ from `SELLER_WALLET_ADDRESS`.
+| Role | Who pays | Chain / asset (typical) | Implementation |
+|------|-----------|---------------------------|----------------|
+| **Tool buyer** | Client calling MCP | `CHAIN_NETWORK` (e.g. Base Sepolia USDC) | Ampersend + CDP or `BUYER_PRIVATE_KEY` |
+| **LLM buyer** | Seller process | **Base mainnet** USDC to BlockRun | `SELLER_PRIVATE_KEY` + viem EIP-712 in `clawrouter.ts` |
 
-## What This Demonstrates
+`SELLER_WALLET_ADDRESS` receives buyer tool payments. The address derived from **`SELLER_PRIVATE_KEY`** pays BlockRun and may **differ** from `SELLER_WALLET_ADDRESS`.
 
-| Use Case | Component | Key Feature |
-|---|---|---|
-| **Seller** — charge for AI tools | `packages/seller` | `withX402Payment` + ClawRouter LLM backend |
-| **LLM payment** — pay-per-request AI | `packages/seller/clawrouter.ts` | viem EIP-712 x402 (ClawRouter-compatible) → `blockrun.ai/api` |
-| **Buyer (test)** — auto-approve | `packages/buyer/naive-buyer.ts` | AgentCore wallet + NaiveTreasurer |
-| **Buyer (prod)** — spend-limited | `packages/buyer/mcp-buyer.ts` | AgentCore wallet + AmpersendTreasurer |
-| **HTTP buyer** — paid HTTP calls | `packages/buyer/http-buyer.ts` | AgentCore wallet + `@x402/fetch` + ampersend treasurer |
-| **MCP Proxy** — transparent proxy | `packages/buyer/proxy.ts` | AgentCore wallet + payment proxy |
-| **AgentCore agent** — autonomous buyer | `app/AgentBuyer/agent.ts` | BedrockAgentCoreApp + AgentCore wallet |
-| **Dashboard** — visualize flows | `packages/web` | NextJS UI |
+---
 
-## Key Changes (vs `main` branch)
+## What this demonstrates
 
-1. **ClawRouter replaces Bedrock** — The seller calls `blockrun.ai/api/v1/chat/completions` (OpenAI-compatible). On 402, the seller signs USDC on **Base mainnet** using the same payload format as ClawRouter’s proxy (not the ampersend `wrapFetchWithPayment` path used for generic HTTP).
+| Use case | Location | Notes |
+|----------|----------|--------|
+| Seller (paid tools) | `packages/seller` | FastMCP + `withX402Payment` |
+| LLM (BlockRun) | `packages/seller/clawrouter.ts` | x402 fetch; EIP-712 compatible with BlockRun |
+| Naive buyer | `packages/buyer/naive-buyer.ts` | `createAgentCoreWallet` + Naive treasurer |
+| Spend limits | `packages/buyer/mcp-buyer.ts` | Ampersend treasurer when smart account configured |
+| HTTP x402 | `packages/buyer/http-buyer.ts` | `@x402/fetch` + Ampersend |
+| MCP proxy | `packages/buyer/proxy.ts` | Transparent proxy |
+| Bedrock AgentCore | `app/AgentBuyer/agent.ts` | Imports `@poc/buyer/agentcore-wallet` |
+| Dashboard | `packages/web` | Next.js |
 
-2. **AgentCore Wallet** — All buyer-side x402 payments use the Coinbase CDP wallet pattern (from the [AWS AgentCore x402 sample](https://github.com/aws-samples/sample-agentcore-cloudfront-x402-payments)). Wallet credentials come from CDP API keys (production) or a raw private key (testing).
+---
 
 ## Prerequisites
 
-- **Node.js 20+** and **pnpm**
-- **Coinbase Developer Platform** account ([portal.cdp.coinbase.com](https://portal.cdp.coinbase.com/)) — optional; you can use `BUYER_PRIVATE_KEY` for local testing instead
-- **USDC on Base Sepolia** — fund the **buyer** wallet (and optionally align `SELLER_WALLET_ADDRESS`) for tool payments when `CHAIN_NETWORK=base-sepolia`
-- **USDC on Base mainnet** — fund the address derived from **`SELLER_PRIVATE_KEY`** so the seller can pay ClawRouter (BlockRun settles on mainnet)
-- **Docker** (optional, for AgentCore container deployment)
+- **Node.js 20+** and **pnpm** (see root `packageManager` in `package.json`)
+- **Coinbase Developer Platform** ([portal.cdp.coinbase.com](https://portal.cdp.coinbase.com/)) if you use **CDP mode** (three secrets below)
+- **USDC**
+  - On **Base Sepolia** for tool buyers when `CHAIN_NETWORK=base-sepolia`
+  - On **Base mainnet** for the **seller LLM payer** (address from `SELLER_PRIVATE_KEY`)
+- **Docker** — optional; required to build the AgentBuyer image (see [Container image](#agentcore-container-agent))
 
-## Quick Start
+---
 
-### 1. Install dependencies
+## Environment variables
+
+Copy **`.env.example`** → **`.env`** at the **repository root** (scripts load it from there).
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `CDP_API_KEY_ID` | For CDP mode | Coinbase CDP API key id |
+| `CDP_API_KEY_SECRET` | For CDP mode | CDP API secret |
+| `CDP_WALLET_SECRET` | For CDP mode | CDP wallet secret (AgentKit [requires all three](https://github.com/coinbase/agentkit)) |
+| `CDP_WALLET_ADDRESS` | Optional | Use an existing CDP EVM account instead of creating one |
+| `BUYER_PRIVATE_KEY` | If **not** using full CDP | Local EOA for x402 signing (testing) |
+| `SELLER_WALLET_ADDRESS` | Recommended | Address that receives tool payments |
+| `SELLER_PRIVATE_KEY` | For real LLM responses | Signs x402 to BlockRun; fund on **Base mainnet** |
+| `CHAIN_NETWORK` | Optional | e.g. `base-sepolia` (buyer↔seller) |
+| `CLAWROUTER_MODEL` | Optional | Concrete model id, e.g. `claude-haiku-4.5` (not `blockrun/auto` on the bare HTTP API) |
+| `SELLER_URL` | AgentCore / remote | Seller MCP URL (must be reachable from the agent, not `localhost` in cloud) |
+
+**Wallet selection (buyer):**
+
+1. If **`CDP_API_KEY_ID`**, **`CDP_API_KEY_SECRET`**, and **`CDP_WALLET_SECRET`** are all set → **CDP / AgentKit** (`getMode()` → `"cdp"`).
+2. Else if **`BUYER_PRIVATE_KEY`** is set → **local EOA** (`"local"`).
+3. Else → **ephemeral** unfunded wallet (demo only).
+
+Use **either** full CDP **or** `BUYER_PRIVATE_KEY` for predictable behavior; avoid leaving stray `BUYER_PRIVATE_KEY` in `.env` when you intend to test CDP only.
+
+---
+
+## Quick start
 
 ```bash
 pnpm install
-```
-
-### 2. Configure environment
-
-```bash
 cp .env.example .env
+# Edit .env — CDP (three vars) OR BUYER_PRIVATE_KEY; configure seller keys and CLAWROUTER_MODEL
+
+pnpm seller:dev    # terminal 1 — http://localhost:8000/mcp
+pnpm buyer:naive   # terminal 2
+pnpm web:dev       # optional — http://localhost:3000
 ```
 
-Edit `.env`:
+---
 
-```bash
-# Option A: CDP (production) — all three required for AgentKit
-CDP_API_KEY_ID=your-key-id
-CDP_API_KEY_SECRET=your-key-secret
-CDP_WALLET_SECRET=your-wallet-secret
+## Scripts (root)
 
-# Option B: Raw private key (testing, no CDP)
-BUYER_PRIVATE_KEY=0x...
+| Script | Description |
+|--------|-------------|
+| `pnpm seller:dev` | FastMCP seller with ClawRouter/BlockRun backend |
+| `pnpm buyer:naive` | MCP buyer with `createAgentCoreWallet` |
+| `pnpm buyer:mcp` | Buyer with Ampersend treasurer (smart account env optional) |
+| `pnpm buyer:http` | HTTP x402 sample |
+| `pnpm buyer:proxy` | MCP payment proxy |
+| `pnpm web:dev` | Next.js app |
+| `pnpm build` | Build all workspace packages (including `app/AgentBuyer`) |
 
-# Seller config
-SELLER_WALLET_ADDRESS=0x...    # receives USDC from buyers (testnet address)
-SELLER_PRIVATE_KEY=0x...       # signs ClawRouter x402 — fund this address on Base mainnet
+---
 
-# ClawRouter model (direct API — not the OpenClaw local proxy)
-# Use a concrete model id, e.g. claude-haiku-4.5, gpt-5-mini (see BlockRun 402 error / docs)
-CLAWROUTER_MODEL=claude-haiku-4.5
-```
+## AgentCore wallet (CDP + Ampersend)
 
-### 3. Start the seller
+Implementation: `packages/buyer/src/agentcore-wallet.ts` + `packages/buyer/src/cdp-viem-account.ts`.
 
-```bash
-pnpm seller:dev
-# FastMCP server on http://localhost:8000/mcp
-# LLM backend: ClawRouter via x402
-```
-
-### 4. Run a buyer
-
-```bash
-# Naive buyer (auto-approves, uses AgentCore wallet)
-pnpm buyer:naive
-
-# Or with Ampersend spend limits
-pnpm buyer:mcp
-```
-
-### 5. Start the dashboard
-
-```bash
-pnpm web:dev
-# Open http://localhost:3000
-```
-
-## AgentCore Wallet Provider
-
-The `AgentCoreWalletProvider` (`packages/buyer/src/agentcore-wallet.ts`) integrates **Coinbase AgentKit** [`CdpEvmWalletProvider`](https://github.com/coinbase/agentkit) when CDP credentials are present, and bridges it to a viem `LocalAccount` via `toAccount` so Ampersend’s `AccountWallet` can call `x402`’s `createPaymentHeader` (see `packages/buyer/src/cdp-viem-account.ts`).
+[Coinbase AgentKit](https://github.com/coinbase/agentkit) **`CdpEvmWalletProvider`** performs server-side signing. The code wraps it with **viem `toAccount()`** so **`AccountWallet`** can use **`x402`’s `createPaymentHeader`** (EIP-3009 style payments used by Ampersend).
 
 ```typescript
 import { createAgentCoreWallet } from "./agentcore-wallet.js";
 
-// 1. CDP_API_KEY_ID + CDP_API_KEY_SECRET + CDP_WALLET_SECRET → real CDP server wallet (mode "cdp")
-// 2. BUYER_PRIVATE_KEY → local EOA (mode "local")
-// 3. Neither → ephemeral wallet (unfunded)
 const wallet = await createAgentCoreWallet();
-
-console.log(wallet.getAddress());   // 0x...
-console.log(wallet.getMode());      // "cdp" | "local"
-wallet.getCdpProvider();            // CdpEvmWalletProvider | null (CDP only)
+console.log(wallet.getAddress(), wallet.getMode()); // "cdp" | "local"
+wallet.getCdpProvider(); // CdpEvmWalletProvider | null
 
 const treasurer = wallet.createNaiveTreasurer();
 ```
 
-In production, store **CDP_API_KEY_ID**, **CDP_API_KEY_SECRET**, and **CDP_WALLET_SECRET** in **AWS Secrets Manager** (or inject via AgentCore environment) — never commit them.
+**Export for other packages:** `@poc/buyer/agentcore-wallet` (see `packages/buyer/package.json` `"exports"`).
 
-## AgentCore container agent (`app/AgentBuyer`)
+Production: load CDP secrets from **AWS Secrets Manager** (or AgentCore-injected env), never commit `.env`.
 
-The **runtime wiring is correct** for a bring-your-own-container agent: `BedrockAgentCoreApp` handles HTTP invocations, and each request uses the Ampersend MCP `Client` + `StreamableHTTPClientTransport` to call the seller’s paid tools with a `NaiveTreasurer` backed by `AccountWallet`.
+---
 
-**What you must configure for a real deployment**
+## AgentCore container agent
 
-| Item | Status |
-|------|--------|
-| `BedrockAgentCoreApp` + `invocationHandler.process` | Correct |
-| Wallet resolution | **CDP:** `CDP_API_KEY_ID` + `CDP_API_KEY_SECRET` + `CDP_WALLET_SECRET` → AgentKit `CdpEvmWalletProvider` (real server-side signing). **Fallback:** `BUYER_PRIVATE_KEY` for local EOA. `app/AgentBuyer` imports `createAgentCoreWallet` from `@poc/buyer/agentcore-wallet`. |
-| **`SELLER_URL`** | **Required.** Defaults to `http://localhost:8000/mcp`, which only works on your laptop. In AgentCore, set this to a **publicly reachable** seller URL (HTTPS, correct path). The agent cannot reach `localhost` inside the container. |
-| Secrets | Prefer **Secrets Manager** / runtime env for **CDP** vars or `BUYER_PRIVATE_KEY`; do not bake into the image. |
-| `agentcore/agentcore.json` shows `PYTHON_3_12` / `main.py` | **Normal for container agents.** AWS documents that for `build: Container`, those fields are placeholders; the **Dockerfile `CMD`** is what actually runs ([TypeScript container guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-cli-typescript.html)). |
-| New MCP connection per invocation | Fine for a POC; reuse a client if you need higher throughput. |
+- **`app/AgentBuyer`** is part of the **pnpm workspace** and depends on **`@poc/buyer`**.
+- Set **`SELLER_URL`** to a **public** seller MCP URL when deploying; `http://localhost:8000/mcp` only works locally.
+- **`agentcore/agentcore.json`**: `PYTHON_3_12` / `main.py` are **placeholders** for container builds; the image **`CMD`** from the Dockerfile is authoritative ([AWS TS container guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-cli-typescript.html)).
 
-Local run (optional): `agent.ts` walks up parent directories and loads the first `.env` found (usually the repo root). In AgentCore, environment variables are injected by the platform instead.
-
-**Container image:** build from the **repository root** (workspace packages required):
+**Docker** (from **repository root**):
 
 ```bash
 docker build -f app/AgentBuyer/Dockerfile .
 ```
 
-## ClawRouter Integration
+The Dockerfile uses **`pnpm --filter agent-buyer deploy --legacy`** so the image includes pruned `node_modules` and `dist/`.
 
-`packages/seller/src/clawrouter.ts` implements an x402-aware `fetch` that mirrors ClawRouter’s [`createPaymentFetch`](https://github.com/edgeandnode/ClawRouter/blob/main/src/x402.ts): parse `x-payment-required`, sign **EIP-712 `TransferWithAuthorization`**, retry with `x-payment` / `payment-signature`.
+---
 
-```typescript
-import { askClawRouter } from "./clawrouter.js";
+## ClawRouter / BlockRun (seller LLM)
 
-const response = await askClawRouter("Explain quantum computing");
-```
+Direct HTTP API: **`https://blockrun.ai/api/v1/chat/completions`**.
 
-Pick a **concrete** `CLAWROUTER_MODEL` supported by the live API. Routing profiles such as `blockrun/auto` are for the **local** ClawRouter/OpenClaw proxy, not the bare `https://blockrun.ai/api` endpoint used here.
+Use a **concrete** `CLAWROUTER_MODEL` supported by the live API. Profiles like **`blockrun/auto`** apply to the **local** ClawRouter/OpenClaw proxy, not necessarily to bare `blockrun.ai/api`.
 
-## Project Structure
+---
+
+## Testing & troubleshooting
+
+| Symptom | Likely cause |
+|---------|----------------|
+| `[Mock response — ClawRouter unavailable]` | BlockRun x402 failed: fund **mainnet USDC** on the address from **`SELLER_PRIVATE_KEY`**, or wrong model / payload |
+| `PAYMENT_INVALID` / verification errors (seller→BlockRun) | Wrong chain funding, or insufficient USDC on the **signing** address |
+| Buyer payments fail on Sepolia | Fund the **buyer** wallet (CDP account or `BUYER_PRIVATE_KEY` address) with Sepolia USDC |
+| CDP mode not used | All three of `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, `CDP_WALLET_SECRET` must be set; remove `BUYER_PRIVATE_KEY` if you only want CDP |
+
+**Secrets in git:** `.env` is gitignored; use `.cursorignore` / `.claudeignore` patterns so editors don’t index secrets.
+
+---
+
+## Project structure
 
 ```
 aws-agentcore-ampersend/
 ├── packages/
-│   ├── seller/
-│   │   └── src/
-│   │       ├── index.ts            # FastMCP server with paid tools
-│   │       └── clawrouter.ts       # BlockRun API + viem x402 (ClawRouter-compatible)
-│   ├── buyer/
-│   │   └── src/
-│   │       ├── agentcore-wallet.ts # AgentCore wallet provider (CDP)
-│   │       ├── naive-buyer.ts      # NaiveTreasurer buyer
-│   │       ├── mcp-buyer.ts        # AmpersendTreasurer buyer
-│   │       ├── http-buyer.ts       # HTTP x402 buyer
-│   │       └── proxy.ts            # MCP payment proxy
-│   └── web/                        # NextJS dashboard
-├── app/AgentBuyer/                 # AgentCore container agent
-├── agentcore/                      # AgentCore CLI config
-└── .env.example
+│   ├── seller/src/
+│   │   ├── index.ts           # FastMCP + paid tools
+│   │   └── clawrouter.ts      # BlockRun HTTP + viem x402
+│   ├── buyer/src/
+│   │   ├── agentcore-wallet.ts
+│   │   ├── cdp-viem-account.ts  # CDP ↔ viem LocalAccount bridge
+│   │   ├── naive-buyer.ts, mcp-buyer.ts, http-buyer.ts, proxy.ts
+│   └── web/                   # Next.js dashboard
+├── app/AgentBuyer/            # BedrockAgentCoreApp + @poc/buyer
+├── agentcore/                 # AgentCore CLI metadata
+├── .env.example
+└── README.md
 ```
+
+---
 
 ## Technologies
 
-- [AWS Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/) — Agent hosting
-- [Ampersend SDK](https://github.com/edgeandnode/ampersend-sdk) — x402 payment protocol
-- [ClawRouter](https://github.com/edgeandnode/ClawRouter) — Smart LLM routing (41+ models)
-- [x402](https://github.com/coinbase/x402) — Micropayment protocol (USDC)
-- [Coinbase CDP](https://docs.cdp.coinbase.com/) + [AgentKit](https://docs.cdp.coinbase.com/agent-kit/docs/welcome) — Buyer wallet (`CdpEvmWalletProvider`)
-- [Next.js](https://nextjs.org) + [Tailwind CSS](https://tailwindcss.com) — Dashboard
+- [AWS Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/)
+- [Ampersend SDK](https://github.com/edgeandnode/ampersend-sdk)
+- [BlockRun / ClawRouter](https://github.com/edgeandnode/ClawRouter) — routing & `blockrun.ai` API
+- [x402](https://github.com/coinbase/x402)
+- [Coinbase CDP](https://docs.cdp.coinbase.com/) + [AgentKit](https://docs.cdp.coinbase.com/agent-kit/docs/welcome)
+- [Next.js](https://nextjs.org), [Tailwind CSS](https://tailwindcss.com)
+- [viem](https://viem.sh)
+
+---
 
 ## License
 
-See repository root for license terms (add a `LICENSE` file if none is present).
+Add a `LICENSE` file at the repository root if you distribute this project; this README does not specify a SPDX id by default.
