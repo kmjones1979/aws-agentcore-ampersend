@@ -8,7 +8,8 @@ TypeScript monorepo that connects **AWS Bedrock AgentCore** (optional deploy tar
 
 - [Architecture and data flow](#architecture-and-data-flow)
 - [How each product fits](#how-each-product-fits)
-- [Setup and testing](#setup-and-testing)
+- [AgentCore integrations](#agentcore-integrations)
+- [Quick start](#quick-start)
 - [Environment variables](#environment-variables)
 - [Scripts](#scripts)
 - [AgentCore wallet (buyer)](#agentcore-wallet-buyer)

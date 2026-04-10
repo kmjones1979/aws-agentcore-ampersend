@@ -14,6 +14,26 @@ import { ExactEvmSchemeV1 } from "@x402/evm/exact/v1/facilitator";
 import { toFacilitatorEvmSigner } from "@x402/evm";
 import { askClawRouter } from "./clawrouter.js";
 
+// OpenTelemetry
+import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import { SimpleSpanProcessor, ConsoleSpanExporter } from "@opentelemetry/sdk-trace-node";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { resourceFromAttributes } from "@opentelemetry/resources";
+import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
+import { trace, SpanStatusCode } from "@opentelemetry/api";
+
+const otelResource = resourceFromAttributes({ [ATTR_SERVICE_NAME]: "agentcore-seller" });
+const spanProcessors: ConstructorParameters<typeof NodeTracerProvider>[0]["spanProcessors"] = [
+  new SimpleSpanProcessor(new ConsoleSpanExporter()),
+];
+const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+if (otlpEndpoint) {
+  spanProcessors.push(new SimpleSpanProcessor(new OTLPTraceExporter({ url: otlpEndpoint })));
+}
+const otelProvider = new NodeTracerProvider({ resource: otelResource, spanProcessors });
+otelProvider.register();
+const tracer = trace.getTracer("agentcore-seller");
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -102,43 +122,68 @@ async function settlePayment(
   payment: unknown,
   requirements: Record<string, unknown>,
 ) {
-  if (!localFacilitator) {
-    throw new Error(
-      "No facilitator configured — set SELLER_PRIVATE_KEY or SELLER_BLOCKRUN_PRIVATE_KEY",
-    );
-  }
+  return tracer.startActiveSpan(`settle:${toolName}`, {
+    attributes: {
+      "tool.name": toolName,
+      "payment.payTo": String(requirements.payTo ?? ""),
+      "payment.amount": String(requirements.maxAmountRequired ?? ""),
+      "payment.network": NETWORK,
+    },
+  }, async (span) => {
+    try {
+      if (!localFacilitator) {
+        throw new Error(
+          "No facilitator configured — set SELLER_PRIVATE_KEY or SELLER_BLOCKRUN_PRIVATE_KEY",
+        );
+      }
 
-  console.log(
-    `[seller] ${toolName} — verifying payment (payTo: ${requirements.payTo}, amount: ${requirements.maxAmountRequired}, network: ${NETWORK})`,
-  );
+      console.log(
+        `[seller] ${toolName} — verifying payment (payTo: ${requirements.payTo}, amount: ${requirements.maxAmountRequired}, network: ${NETWORK})`,
+      );
 
-  const verifyResult = await localFacilitator.verify(
-    payment as any,
-    requirements as any,
-  );
-  if (!verifyResult.isValid) {
-    const reason = (verifyResult as any).invalidReason ?? "unknown";
-    console.error(
-      `[seller] ${toolName} — payment verification failed: ${reason}`,
-    );
-    throw new Error(`Payment verification failed: ${reason}`);
-  }
-  console.log(`[seller] ${toolName} — payment verified, settling on-chain…`);
+      const verifyResult = await localFacilitator.verify(
+        payment as any,
+        requirements as any,
+      );
+      if (!verifyResult.isValid) {
+        const reason = (verifyResult as any).invalidReason ?? "unknown";
+        span.setAttribute("payment.verify_result", "failed");
+        span.setAttribute("payment.verify_reason", reason);
+        console.error(
+          `[seller] ${toolName} — payment verification failed: ${reason}`,
+        );
+        throw new Error(`Payment verification failed: ${reason}`);
+      }
+      span.setAttribute("payment.verify_result", "valid");
+      console.log(`[seller] ${toolName} — payment verified, settling on-chain…`);
 
-  const settleResult = await localFacilitator.settle(
-    payment as any,
-    requirements as any,
-  );
-  if (!settleResult.success) {
-    const reason = (settleResult as any).errorReason ?? "unknown";
-    console.error(`[seller] ${toolName} — settlement failed: ${reason}`);
-    throw new Error(`Settlement failed: ${reason}`);
-  }
+      const settleResult = await localFacilitator.settle(
+        payment as any,
+        requirements as any,
+      );
+      if (!settleResult.success) {
+        const reason = (settleResult as any).errorReason ?? "unknown";
+        span.setAttribute("payment.settle_result", "failed");
+        console.error(`[seller] ${toolName} — settlement failed: ${reason}`);
+        throw new Error(`Settlement failed: ${reason}`);
+      }
 
-  console.log(
-    `[seller] ${toolName} — settled ✓ tx: ${settleResult.transaction ?? "(pending)"} network: ${settleResult.network ?? NETWORK}`,
-  );
-  return settleResult;
+      span.setAttribute("payment.settle_result", "success");
+      span.setAttribute("payment.tx_hash", settleResult.transaction ?? "");
+      span.setStatus({ code: SpanStatusCode.OK });
+
+      console.log(
+        `[seller] ${toolName} — settled ✓ tx: ${settleResult.transaction ?? "(pending)"} network: ${settleResult.network ?? NETWORK}`,
+      );
+      return settleResult;
+    } catch (err) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+      span.recordException(err instanceof Error ? err : new Error(String(err)));
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -194,12 +239,22 @@ server.addTool({
       return await settlePayment("research_topic", payment, requirements);
     },
   })(async (args: { topic: string; depth: string }) => {
-    const prompt =
-      args.depth === "detailed"
-        ? `Provide a detailed, multi-paragraph research overview of: ${args.topic}. Include key facts, history, and current developments.`
-        : `Provide a brief research overview of: ${args.topic}. Keep it concise — 2-3 paragraphs.`;
-
-    return await askClawRouter(prompt);
+    return tracer.startActiveSpan("llm:research_topic", { attributes: { "llm.tool": "research_topic", "llm.depth": args.depth } }, async (span) => {
+      try {
+        const prompt =
+          args.depth === "detailed"
+            ? `Provide a detailed, multi-paragraph research overview of: ${args.topic}. Include key facts, history, and current developments.`
+            : `Provide a brief research overview of: ${args.topic}. Keep it concise — 2-3 paragraphs.`;
+        const result = await askClawRouter(prompt);
+        span.setStatus({ code: SpanStatusCode.OK });
+        return result;
+      } catch (err) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
   }),
 });
 
@@ -227,8 +282,19 @@ server.addTool({
       return await settlePayment("summarize_text", payment, requirements);
     },
   })(async (args: { text: string; max_sentences: number }) => {
-    const prompt = `Summarize the following text in at most ${args.max_sentences} sentences:\n\n${args.text}`;
-    return await askClawRouter(prompt);
+    return tracer.startActiveSpan("llm:summarize_text", { attributes: { "llm.tool": "summarize_text" } }, async (span) => {
+      try {
+        const prompt = `Summarize the following text in at most ${args.max_sentences} sentences:\n\n${args.text}`;
+        const result = await askClawRouter(prompt);
+        span.setStatus({ code: SpanStatusCode.OK });
+        return result;
+      } catch (err) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
   }),
 });
 
@@ -258,8 +324,19 @@ server.addTool({
       return await settlePayment("generate_code", payment, requirements);
     },
   })(async (args: { description: string; language: string }) => {
-    const prompt = `Generate ${args.language} code for the following:\n\n${args.description}\n\nReturn only the code with brief comments. No explanations outside the code.`;
-    return await askClawRouter(prompt);
+    return tracer.startActiveSpan("llm:generate_code", { attributes: { "llm.tool": "generate_code", "llm.language": args.language } }, async (span) => {
+      try {
+        const prompt = `Generate ${args.language} code for the following:\n\n${args.description}\n\nReturn only the code with brief comments. No explanations outside the code.`;
+        const result = await askClawRouter(prompt);
+        span.setStatus({ code: SpanStatusCode.OK });
+        return result;
+      } catch (err) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
   }),
 });
 
@@ -280,3 +357,4 @@ console.log(`[seller] LLM backend: ClawRouter (${model}) via x402`);
 console.log(`[seller] Seller wallet: ${SELLER_ADDRESS}`);
 console.log(`[seller] Network: ${NETWORK}`);
 console.log(`[seller] Tools: research_topic, summarize_text, generate_code`);
+console.log(`[seller] Telemetry: OpenTelemetry tracing active`);
