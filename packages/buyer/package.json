@@ -4,7 +4,11 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./agentcore-wallet": "./src/agentcore-wallet.ts"
+    "./agentcore-wallet": {
+      "types": "./dist/agentcore-wallet.d.ts",
+      "import": "./dist/agentcore-wallet.js",
+      "default": "./dist/agentcore-wallet.js"
+    }
   },
   "scripts": {
     "naive": "tsx src/naive-buyer.ts",

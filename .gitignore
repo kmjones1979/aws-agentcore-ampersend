@@ -1,10 +1,42 @@
+# Dependencies
 node_modules/
+
+# Build outputs
 dist/
+.next/
+out/
+build/
+.turbo/
+
+# Environment & secrets (keep .env.example tracked)
 .env
 .env.local
-.next/
-.tsbuildinfo
+.env.production
+.env.*.local
+!.env.example
+
+# TypeScript
+*.tsbuildinfo
 *.js.map
 *.d.ts.map
+
+# Test & coverage
+coverage/
+
+# Logs & debug
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS & editors
 .DS_Store
+.idea/
+
+# Deploy / certs
+.vercel
+*.pem
+
+# npm (this repo uses pnpm)
 package-lock.json

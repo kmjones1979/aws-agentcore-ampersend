@@ -24,6 +24,8 @@ const TRANSFER_TYPES = {
 
 const DEFAULT_TOKEN_NAME = "USD Coin";
 const DEFAULT_TOKEN_VERSION = "2";
+const DEFAULT_NETWORK = "eip155:8453";
+const DEFAULT_MAX_TIMEOUT_SECONDS = 300;
 const BASE_CHAIN_ID = 8453;
 const BASE_SEPOLIA_CHAIN_ID = 84532;
 
@@ -62,18 +64,49 @@ function encodeBase64Json(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64");
 }
 
+function normalizeNetwork(network: string | undefined): string {
+  if (!network || network.trim().length === 0) {
+    return DEFAULT_NETWORK;
+  }
+  return network.trim().toLowerCase();
+}
+
 function resolveChainId(network: string): number {
   const eip155Match = network.match(/^eip155:(\d+)$/i);
-  if (eip155Match) return Number.parseInt(eip155Match[1], 10);
+  if (eip155Match) {
+    const parsed = Number.parseInt(eip155Match[1], 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
   if (network === "base") return BASE_CHAIN_ID;
   if (network === "base-sepolia") return BASE_SEPOLIA_CHAIN_ID;
   return BASE_CHAIN_ID;
 }
 
+/** Parse `0x…` or CAIP-style values ending in `0x…` (matches ClawRouter upstream). */
 function parseHexAddress(value: string | undefined): Hex | undefined {
   if (!value) return undefined;
-  const match = value.match(/0x[a-fA-F0-9]{40}$/);
-  return match ? (match[0] as Hex) : undefined;
+
+  const direct = value.match(/^0x[a-fA-F0-9]{40}$/i);
+  if (direct) {
+    return direct[0] as Hex;
+  }
+
+  const suffix = value.match(/0x[a-fA-F0-9]{40}$/i);
+  if (suffix) {
+    return suffix[0] as Hex;
+  }
+
+  return undefined;
+}
+
+function requireHexAddress(value: string | undefined, field: string): Hex {
+  const parsed = parseHexAddress(value);
+  if (!parsed) {
+    throw new Error(`Invalid ${field} in payment requirements: ${String(value)}`);
+  }
+  return parsed;
 }
 
 async function createPaymentPayload(
@@ -84,15 +117,18 @@ async function createPaymentPayload(
   requestUrl: string,
   resource: PaymentRequired["resource"],
 ): Promise<string> {
-  const network = option.network?.trim().toLowerCase() || "eip155:8453";
+  const network = normalizeNetwork(option.network);
   const chainId = resolveChainId(network);
-  const recipient = parseHexAddress(option.payTo)!;
-  const verifyingContract = parseHexAddress(option.asset)!;
-  const maxTimeout = option.maxTimeoutSeconds ?? 300;
+  const recipient = requireHexAddress(option.payTo, "payTo");
+  const verifyingContract = requireHexAddress(option.asset, "asset");
+  const maxTimeoutSeconds =
+    typeof option.maxTimeoutSeconds === "number" && option.maxTimeoutSeconds > 0
+      ? Math.floor(option.maxTimeoutSeconds)
+      : DEFAULT_MAX_TIMEOUT_SECONDS;
 
   const now = Math.floor(Date.now() / 1000);
   const validAfter = now - 600;
-  const validBefore = now + maxTimeout;
+  const validBefore = now + maxTimeoutSeconds;
   const nonce = createNonce();
 
   const signature = await signTypedData({
@@ -261,7 +297,7 @@ export async function askClawRouter(
     );
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
-    console.warn("[clawrouter] Call failed, using mock response:", msg);
-    return `[Mock response — ClawRouter unavailable] Simulated answer for: "${prompt}"`;
+    console.error("[clawrouter] BlockRun / ClawRouter call failed:", msg);
+    throw error instanceof Error ? error : new Error(msg);
   }
 }

@@ -1,15 +1,10 @@
 /**
- * Ampersend MCP Buyer — production pattern with AgentCore wallet + spend limits.
+ * MCP buyer — defaults to AgentCore wallet + NaiveTreasurer (same x402 path as naive-buyer).
  *
- * Uses the AgentCore wallet provider for credential management, combined
- * with the AmpersendTreasurer for API-authorized, spend-limited payments.
- *
- * In production, the CDP wallet credentials would be stored in
- * AWS Secrets Manager and retrieved just-in-time by the AgentCore runtime.
- *
- * Usage:
- *   CDP_API_KEY_ID=... \
- *   CDP_API_KEY_SECRET=... \
+ * Optional spend-limited treasurer (Ampersend API / session key, not CDP signing):
+ *   AMPERSEND_SPEND_LIMIT_TREASURER=1 \
+ *   BUYER_SMART_ACCOUNT_ADDRESS=0x... \
+ *   BUYER_SESSION_KEY_PRIVATE_KEY=0x... \
  *   pnpm --filter @poc/buyer mcp
  */
 import { config } from "dotenv";
@@ -31,28 +26,39 @@ async function main() {
   console.log(`[mcp-buyer] Connecting to seller at ${SELLER_URL}`);
   console.log(`[mcp-buyer] AgentCore wallet: ${address} (${walletProvider.getMode()} mode)`);
 
-  // Create AmpersendTreasurer using the AgentCore wallet's underlying key.
-  // In production, the smart account would be provisioned via the Ampersend
-  // setup flow tied to the CDP wallet address.
-  const smartAccountAddress =
-    process.env.BUYER_SMART_ACCOUNT_ADDRESS ?? address;
-  const sessionKeyPrivateKey =
-    process.env.BUYER_SESSION_KEY_PRIVATE_KEY;
+  // Default: x402 signing goes through the AgentCore wallet (CDP or BUYER_PRIVATE_KEY)
+  // via NaiveTreasurer — same as naive-buyer / web dashboard.
+  //
+  // Opt-in spend limits: set AMPERSEND_SPEND_LIMIT_TREASURER=1 plus smart-account env vars.
+  // That path uses Ampersend's API treasurer (session key), not CDP EIP-712 signing.
+  const useSpendLimitTreasurer =
+    process.env.AMPERSEND_SPEND_LIMIT_TREASURER === "1";
+  const smartAccountAddress = process.env.BUYER_SMART_ACCOUNT_ADDRESS;
+  const sessionKeyPrivateKey = process.env.BUYER_SESSION_KEY_PRIVATE_KEY;
 
   let treasurer;
-  if (smartAccountAddress && sessionKeyPrivateKey) {
+  if (
+    useSpendLimitTreasurer &&
+    smartAccountAddress &&
+    sessionKeyPrivateKey
+  ) {
     treasurer = createAmpersendTreasurer({
       smartAccountAddress: smartAccountAddress as `0x${string}`,
       sessionKeyPrivateKey: sessionKeyPrivateKey as `0x${string}`,
       apiUrl: process.env.AMPERSEND_API_URL ?? "https://api.ampersend.ai",
       chainId: process.env.CHAIN_NETWORK === "base" ? 8453 : 84532,
     });
-    console.log("[mcp-buyer] Using AmpersendTreasurer (spend-limited)");
-  } else {
     console.log(
-      "[mcp-buyer] No smart account configured — falling back to NaiveTreasurer",
+      "[mcp-buyer] Using AmpersendTreasurer (spend-limited; not CDP-signed)",
     );
+  } else {
+    if (useSpendLimitTreasurer) {
+      console.log(
+        "[mcp-buyer] AMPERSEND_SPEND_LIMIT_TREASURER=1 but missing BUYER_SMART_ACCOUNT_ADDRESS or BUYER_SESSION_KEY_PRIVATE_KEY — using AgentCore NaiveTreasurer",
+      );
+    }
     treasurer = walletProvider.createNaiveTreasurer();
+    console.log("[mcp-buyer] Using AgentCore wallet + NaiveTreasurer (x402 via CDP or BUYER_PRIVATE_KEY)");
   }
 
   const client = new Client(

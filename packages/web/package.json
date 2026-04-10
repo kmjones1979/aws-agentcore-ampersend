@@ -3,12 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "pnpm --filter @poc/buyer build",
     "dev": "next dev",
-    "build": "next build",
+    "build": "pnpm --filter @poc/buyer build && next build",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
+    "@ampersend_ai/ampersend-sdk": "^0.0.16",
+    "@poc/buyer": "workspace:*",
+    "dotenv": "^16.4.7",
     "next": "16.2.3",
     "react": "19.2.4",
     "react-dom": "19.2.4"

@@ -1,5 +1,22 @@
-# Secrets
+# Large / generated — keep AI context focused on source
+node_modules/
+dist/
+.next/
+out/
+build/
+coverage/
+.turbo/
+
+# Secrets & local env (never index)
 .env
 .env.local
 .env.production
 .env.*.local
+!.env.example
+
+# Logs
+*.log
+pnpm-debug.log*
+
+# OS
+.DS_Store
