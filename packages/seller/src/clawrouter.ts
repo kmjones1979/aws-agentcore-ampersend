@@ -1,9 +1,16 @@
 /**
- * ClawRouter LLM client — calls BlockRun's OpenAI-compatible API
- * with x402 payment handling matching ClawRouter's own protocol.
+ * ClawRouter / BlockRun LLM client — HTTP x402 with **EOA EIP-712** signatures.
  *
- * Uses the same EIP-712 TransferWithAuthorization signing that
- * ClawRouter's local proxy uses (`SELLER_PRIVATE_KEY` via viem).
+ * **Why not Ampersend `SmartAccountWallet` here?** BlockRun’s verifier follows
+ * [ClawRouter’s `x402.ts`](https://github.com/edgeandnode/ClawRouter/blob/main/src/x402.ts):
+ * `viem` **`signTypedData` + `privateKey`** → standard **ECDSA** USDC **TransferWithAuthorization**.
+ * `SmartAccountWallet` instead produces **ERC-1271** (Safe + OwnableValidator / Rhinestone) payloads;
+ * BlockRun’s on-chain check expects the ClawRouter wire format → **`PAYMENT_INVALID` / revert**
+ * if you send smart-account signatures.
+ *
+ * **MCP tool leg:** buyer still pays `SELLER_WALLET_ADDRESS` (often a smart account) via Ampersend.
+ * **BlockRun leg:** must be a **funded EOA** — use `SELLER_BLOCKRUN_PRIVATE_KEY` or `SELLER_PRIVATE_KEY`
+ * whose **derived address holds Base mainnet USDC** (can differ from `SELLER_WALLET_ADDRESS`).
  */
 
 import { signTypedData, privateKeyToAccount } from "viem/accounts";
@@ -84,7 +91,6 @@ function resolveChainId(network: string): number {
   return BASE_CHAIN_ID;
 }
 
-/** Parse `0x…` or CAIP-style values ending in `0x…` (matches ClawRouter upstream). */
 function parseHexAddress(value: string | undefined): Hex | undefined {
   if (!value) return undefined;
 
@@ -107,6 +113,12 @@ function requireHexAddress(value: string | undefined, field: string): Hex {
     throw new Error(`Invalid ${field} in payment requirements: ${String(value)}`);
   }
   return parsed;
+}
+
+function resolveBlockrunEoaPrivateKey(): Hex | undefined {
+  const dedicated = process.env.SELLER_BLOCKRUN_PRIVATE_KEY?.trim() as Hex | undefined;
+  const fallback = process.env.SELLER_PRIVATE_KEY?.trim() as Hex | undefined;
+  return dedicated || fallback;
 }
 
 async function createPaymentPayload(
@@ -182,11 +194,7 @@ async function createPaymentPayload(
   });
 }
 
-// ---------------------------------------------------------------------------
-// x402-aware fetch wrapper (matches ClawRouter's own protocol)
-// ---------------------------------------------------------------------------
-
-function createX402Fetch(privateKey: Hex): typeof fetch {
+function createClawRouterStyleFetch(privateKey: Hex): typeof fetch {
   const account = privateKeyToAccount(privateKey);
   const walletAddress = account.address;
 
@@ -215,7 +223,7 @@ function createX402Fetch(privateKey: Hex): typeof fetch {
     if (!amount) throw new Error("No amount in payment requirements");
 
     console.log(
-      `[clawrouter] x402 payment: ${amount} micro-USDC to ${option.payTo} on ${option.network}`,
+      `[clawrouter] x402 payment: ${amount} micro-USDC to ${option.payTo} on ${option.network} (EOA payer ${walletAddress})`,
     );
 
     const paymentPayload = await createPaymentPayload(
@@ -239,24 +247,28 @@ function createX402Fetch(privateKey: Hex): typeof fetch {
 // Public API
 // ---------------------------------------------------------------------------
 
-let x402Fetch: typeof fetch | null = null;
+let x402FetchPromise: Promise<typeof fetch> | null = null;
 
-function getX402Fetch(): typeof fetch {
-  if (x402Fetch) return x402Fetch;
+async function resolveX402Fetch(): Promise<typeof fetch> {
+  if (x402FetchPromise) return x402FetchPromise;
 
-  const sellerKey = process.env.SELLER_PRIVATE_KEY as Hex | undefined;
-  if (!sellerKey) {
-    console.warn(
-      "[clawrouter] SELLER_PRIVATE_KEY not set — x402 payments disabled, using plain fetch",
+  x402FetchPromise = (async (): Promise<typeof fetch> => {
+    const pk = resolveBlockrunEoaPrivateKey();
+    if (!pk) {
+      console.warn(
+        "[clawrouter] Set SELLER_BLOCKRUN_PRIVATE_KEY or SELLER_PRIVATE_KEY (EOA with Base USDC for BlockRun).",
+      );
+      return fetch;
+    }
+
+    const account = privateKeyToAccount(pk);
+    console.log(
+      `[clawrouter] BlockRun payer (EOA, ClawRouter-compatible): ${account.address}`,
     );
-    x402Fetch = fetch;
-    return fetch;
-  }
+    return createClawRouterStyleFetch(pk);
+  })();
 
-  const account = privateKeyToAccount(sellerKey);
-  console.log(`[clawrouter] x402 wallet: ${account.address}`);
-  x402Fetch = createX402Fetch(sellerKey);
-  return x402Fetch;
+  return x402FetchPromise;
 }
 
 export interface ClawRouterOptions {
@@ -270,7 +282,7 @@ export async function askClawRouter(
 ): Promise<string> {
   const model = opts.model ?? process.env.CLAWROUTER_MODEL ?? "blockrun/auto";
   const maxTokens = opts.maxTokens ?? 1024;
-  const f = getX402Fetch();
+  const f = await resolveX402Fetch();
 
   try {
     const res = await f(`${BLOCKRUN_API}/v1/chat/completions`, {

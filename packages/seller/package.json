@@ -11,8 +11,6 @@
   },
   "dependencies": {
     "@ampersend_ai/ampersend-sdk": "^0.0.16",
-    "@x402/core": "^2.5.0",
-    "@x402/fetch": "^2.5.0",
     "dotenv": "^16.4.7",
     "viem": "^2.45.0",
     "zod": "^3.24.2"

@@ -6,6 +6,7 @@
   "scripts": {
     "seller:dev": "pnpm --filter @poc/seller dev",
     "buyer:naive": "pnpm --filter @poc/buyer naive",
+    "recent-txs": "pnpm --filter @poc/buyer exec tsx ../../scripts/recent-tx-links.ts",
     "buyer:mcp": "pnpm --filter @poc/buyer mcp",
     "buyer:http": "pnpm --filter @poc/buyer http",
     "buyer:proxy": "pnpm --filter @poc/buyer proxy",
