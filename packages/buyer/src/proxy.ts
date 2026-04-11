@@ -27,7 +27,7 @@ async function main() {
   const treasurer = walletProvider.createNaiveTreasurer();
 
   const { server } = await initializeProxyServer({
-    transport: { port: PROXY_PORT },
+    transport: { type: "http", port: PROXY_PORT },
     treasurer,
   } as any);
 

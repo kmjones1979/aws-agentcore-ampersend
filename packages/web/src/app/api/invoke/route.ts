@@ -7,9 +7,10 @@ import {
   StreamableHTTPClientTransport,
 } from "@ampersend_ai/ampersend-sdk/mcp/client";
 import { createAgentCoreWallet } from "@poc/buyer/agentcore-wallet";
-import type { InvokeRequest } from "../../types";
+import { createDefaultPolicy } from "@poc/buyer/policy";
+import { createMemoryClient } from "@poc/buyer/memory";
+import type { InvokeRequest, InvokeResponse } from "../../types";
 
-/** Load monorepo root `.env` when Next runs from `packages/web` (same as CLI buyers). */
 function loadRootEnv(): void {
   const candidates = [
     resolve(process.cwd(), "../../.env"),
@@ -27,7 +28,16 @@ function loadRootEnv(): void {
 loadRootEnv();
 
 const SELLER_URL = process.env.SELLER_URL ?? "http://localhost:8000/mcp";
-const PROXY_URL = process.env.PROXY_URL ?? "http://localhost:8402/mcp";
+
+const TOOL_COSTS: Record<string, number> = {
+  research_topic: 10000,
+  summarize_text: 5000,
+  generate_code: 20000,
+};
+
+// Persistent across requests within the same server process
+const policy = createDefaultPolicy();
+const memory = createMemoryClient(policy.getSessionId());
 
 function resultToText(result: unknown): string {
   const r = result as { content?: Array<{ text?: string }> };
@@ -37,33 +47,53 @@ function resultToText(result: unknown): string {
   return JSON.stringify(result);
 }
 
-/**
- * POST /api/invoke
- *
- * - **naive / ampersend:** Uses `createAgentCoreWallet()` + Ampersend MCP `Client`
- *   (same path as `pnpm buyer:naive`) so x402 is signed by the CDP or
- *   `BUYER_PRIVATE_KEY` wallet.
- * - **proxy:** Forwards to a running `pnpm buyer:proxy` (wallet lives in the proxy process).
- */
 export async function POST(req: Request) {
   try {
     const body: InvokeRequest = await req.json();
-    const { tool, args, buyerPattern } = body;
+    const { tool, args } = body;
+    const cost = TOOL_COSTS[tool] ?? 0;
 
-    const target =
-      buyerPattern === "proxy"
-        ? `${PROXY_URL}?target=${encodeURIComponent(SELLER_URL)}`
-        : SELLER_URL;
+    // 1) Policy check
+    const decision = policy.evaluate(tool, cost);
 
-    if (buyerPattern === "proxy") {
-      return invokeViaRawMcpFetch(target, tool, args);
+    if (!decision.allowed) {
+      const resp: InvokeResponse = {
+        error: `Policy denied: ${decision.reason}`,
+        source: "denied",
+        policy: decision,
+        memory: {
+          cacheHit: false,
+          allTimeSpent: memory.totalSpentAllTime(),
+          priorRecords: memory.getSpendingHistory().length,
+        },
+        ledger: { ...policy.getLedger() },
+      };
+      return NextResponse.json(resp);
     }
 
+    // 2) Memory lookup
+    const cached = memory.lookupCache(tool, args as Record<string, unknown>);
+    if (cached) {
+      const resp: InvokeResponse = {
+        result: cached,
+        source: "cache",
+        policy: decision,
+        memory: {
+          cacheHit: true,
+          allTimeSpent: memory.totalSpentAllTime(),
+          priorRecords: memory.getSpendingHistory().length,
+        },
+        ledger: { ...policy.getLedger() },
+      };
+      return NextResponse.json(resp);
+    }
+
+    // 3) Paid tool call
     const walletProvider = await createAgentCoreWallet();
     const treasurer = walletProvider.createNaiveTreasurer();
 
     const client = new Client(
-      { name: "poc-web", version: "1.0.0" },
+      { name: "poc-web", version: "2.0.0" },
       { mcpOptions: { capabilities: {} }, treasurer },
     );
 
@@ -76,115 +106,44 @@ export async function POST(req: Request) {
         name: tool,
         arguments: args as Record<string, unknown>,
       });
-      return NextResponse.json({ result: resultToText(result) });
+
+      const text = resultToText(result);
+      const meta = (result as any)?._meta?.["x402/payment-response"];
+
+      // Record in policy + memory
+      policy.recordCall(tool, cost);
+      memory.cacheResult(tool, args as Record<string, unknown>, text, cost);
+      memory.recordSpending(tool, cost, meta?.transaction);
+
+      const resp: InvokeResponse = {
+        result: text,
+        source: "paid",
+        policy: decision,
+        memory: {
+          cacheHit: false,
+          allTimeSpent: memory.totalSpentAllTime(),
+          priorRecords: memory.getSpendingHistory().length,
+        },
+        ledger: { ...policy.getLedger() },
+        paymentMeta: meta ?? undefined,
+      };
+      return NextResponse.json(resp);
     } finally {
       await client.close();
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: msg }, { status: 500 });
-  }
-}
-
-/** Legacy path: MCP proxy server performs x402 (run `pnpm buyer:proxy` separately). */
-async function invokeViaRawMcpFetch(
-  target: string,
-  tool: string,
-  args: Record<string, unknown>,
-) {
-  const initRes = await fetch(target, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json, text/event-stream",
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-03-26",
-        capabilities: { tools: {} },
-        clientInfo: { name: "poc-web", version: "1.0.0" },
+    const resp: InvokeResponse = {
+      error: msg,
+      source: "denied",
+      policy: { allowed: false, reason: msg },
+      memory: {
+        cacheHit: false,
+        allTimeSpent: memory.totalSpentAllTime(),
+        priorRecords: memory.getSpendingHistory().length,
       },
-    }),
-  });
-
-  if (!initRes.ok) {
-    return NextResponse.json(
-      {
-        error: `Seller/proxy init failed: ${initRes.status}. Is the proxy running (pnpm buyer:proxy)?`,
-      },
-      { status: 502 },
-    );
+      ledger: { ...policy.getLedger() },
+    };
+    return NextResponse.json(resp, { status: 500 });
   }
-
-  const sessionId = initRes.headers.get("mcp-session-id");
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "application/json, text/event-stream",
-  };
-  if (sessionId) headers["mcp-session-id"] = sessionId;
-
-  const toolRes = await fetch(target, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 2,
-      method: "tools/call",
-      params: { name: tool, arguments: args },
-    }),
-  });
-
-  const contentType = toolRes.headers.get("content-type") ?? "";
-
-  if (toolRes.status === 402) {
-    const text = await toolRes.text();
-    return NextResponse.json({
-      error: `Payment required (402). Start the proxy with AgentCore wallet env: pnpm buyer:proxy\n\n${text}`,
-    });
-  }
-
-  if (contentType.includes("text/event-stream")) {
-    const text = await toolRes.text();
-    const lines = text.split("\n");
-    const results: string[] = [];
-    for (const line of lines) {
-      if (line.startsWith("data: ")) {
-        try {
-          const parsed = JSON.parse(line.slice(6));
-          if (parsed.result?.content) {
-            for (const c of parsed.result.content) {
-              if (c.text) results.push(c.text);
-            }
-          }
-        } catch {
-          // ignore
-        }
-      }
-    }
-    return NextResponse.json({
-      result: results.join("\n") || text,
-    });
-  }
-
-  if (contentType.includes("application/json")) {
-    const data = await toolRes.json();
-    if (data.error) {
-      return NextResponse.json({
-        error: data.error.message ?? JSON.stringify(data.error),
-      });
-    }
-    if (data.result?.content) {
-      const t = data.result.content
-        .map((c: { text?: string }) => c.text ?? "")
-        .join("\n");
-      return NextResponse.json({ result: t });
-    }
-    return NextResponse.json({ result: JSON.stringify(data, null, 2) });
-  }
-
-  const raw = await toolRes.text();
-  return NextResponse.json({ result: raw });
 }

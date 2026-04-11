@@ -10,8 +10,11 @@
  * @see https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html
  */
 
-import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
-import { SimpleSpanProcessor, ConsoleSpanExporter } from "@opentelemetry/sdk-trace-node";
+import {
+  NodeTracerProvider,
+  SimpleSpanProcessor,
+  ConsoleSpanExporter,
+} from "@opentelemetry/sdk-trace-node";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
@@ -30,15 +33,16 @@ export function initTelemetry(serviceName: string): Tracer {
   if (!initialized) {
     const resource = resourceFromAttributes({ [ATTR_SERVICE_NAME]: serviceName });
 
-    const spanProcessors: ConstructorParameters<typeof NodeTracerProvider>[0]["spanProcessors"] = [
-      new SimpleSpanProcessor(new ConsoleSpanExporter()),
-    ];
+    const processors = [new SimpleSpanProcessor(new ConsoleSpanExporter())];
     const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     if (otlpEndpoint) {
-      spanProcessors.push(new SimpleSpanProcessor(new OTLPTraceExporter({ url: otlpEndpoint })));
+      processors.push(new SimpleSpanProcessor(new OTLPTraceExporter({ url: otlpEndpoint })));
     }
 
-    provider = new NodeTracerProvider({ resource, spanProcessors });
+    provider = new NodeTracerProvider({
+      resource,
+      spanProcessors: processors,
+    } as any);
     provider.register();
     initialized = true;
   }

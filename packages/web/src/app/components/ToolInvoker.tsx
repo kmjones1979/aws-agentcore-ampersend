@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { PaymentEvent, ToolResponse, InvokeRequest } from "../types";
+import type { PaymentEvent, ToolResponse, InvokeRequest, InvokeResponse, SessionLedger, MemoryInfo } from "../types";
 
 const TOOLS = [
   {
@@ -10,12 +10,7 @@ const TOOLS = [
     cost: "0.01 USDC",
     fields: [
       { key: "topic", label: "Topic", type: "text", placeholder: "e.g. x402 payment protocol" },
-      {
-        key: "depth",
-        label: "Depth",
-        type: "select",
-        options: ["brief", "detailed"],
-      },
+      { key: "depth", label: "Depth", type: "select", options: ["brief", "detailed"] },
     ],
   },
   {
@@ -23,12 +18,7 @@ const TOOLS = [
     label: "Summarize Text",
     cost: "0.005 USDC",
     fields: [
-      {
-        key: "text",
-        label: "Text",
-        type: "textarea",
-        placeholder: "Paste text to summarize...",
-      },
+      { key: "text", label: "Text", type: "textarea", placeholder: "Paste text to summarize..." },
       { key: "max_sentences", label: "Max Sentences", type: "number", placeholder: "3" },
     ],
   },
@@ -37,45 +27,23 @@ const TOOLS = [
     label: "Generate Code",
     cost: "0.02 USDC",
     fields: [
-      {
-        key: "description",
-        label: "Description",
-        type: "text",
-        placeholder: "e.g. Fibonacci function",
-      },
-      {
-        key: "language",
-        label: "Language",
-        type: "select",
-        options: ["typescript", "python", "solidity", "rust"],
-      },
+      { key: "description", label: "Description", type: "text", placeholder: "e.g. Fibonacci function" },
+      { key: "language", label: "Language", type: "select", options: ["typescript", "python", "solidity", "rust"] },
     ],
   },
 ] as const;
-
-const BUYER_PATTERNS = [
-  { value: "naive" as const, label: "Naive (auto-approve)", desc: "NaiveTreasurer — no spend limits" },
-  { value: "ampersend" as const, label: "Ampersend", desc: "AmpersendTreasurer — spend-limited" },
-  { value: "proxy" as const, label: "Proxy", desc: "Via MCP proxy on :8402" },
-];
 
 interface Props {
   isLoading: boolean;
   setIsLoading: (v: boolean) => void;
   onPaymentEvent: (e: PaymentEvent) => void;
   onResult: (r: ToolResponse) => void;
+  onGovernanceUpdate: (ledger: SessionLedger, memory: MemoryInfo, cacheHit: boolean) => void;
 }
 
-export function ToolInvoker({
-  isLoading,
-  setIsLoading,
-  onPaymentEvent,
-  onResult,
-}: Props) {
+export function ToolInvoker({ isLoading, setIsLoading, onPaymentEvent, onResult, onGovernanceUpdate }: Props) {
   const [selectedTool, setSelectedTool] = useState(0);
-  const [buyerPattern, setBuyerPattern] = useState<InvokeRequest["buyerPattern"]>("naive");
   const [args, setArgs] = useState<Record<string, string>>({});
-
   const tool = TOOLS[selectedTool];
 
   const handleInvoke = async () => {
@@ -84,90 +52,80 @@ export function ToolInvoker({
     const timestamp = new Date().toISOString();
 
     onPaymentEvent({
-      id,
-      timestamp,
-      tool: tool.name,
-      buyerPattern,
-      status: "pending",
-      amount: tool.cost,
-      message: "Initiating tool call...",
+      id, timestamp, tool: tool.name,
+      status: "policy_check", amount: tool.cost,
+      message: "Checking policy...",
     });
 
     const start = Date.now();
 
     try {
       const parsedArgs: Record<string, unknown> = { ...args };
-      if (parsedArgs.max_sentences) {
-        parsedArgs.max_sentences = Number(parsedArgs.max_sentences);
-      }
+      if (parsedArgs.max_sentences) parsedArgs.max_sentences = Number(parsedArgs.max_sentences);
 
       const res = await fetch("/api/invoke", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tool: tool.name,
-          args: parsedArgs,
-          buyerPattern,
-        } satisfies InvokeRequest),
+        body: JSON.stringify({ tool: tool.name, args: parsedArgs } satisfies InvokeRequest),
       });
 
-      const data = await res.json();
+      const data: InvokeResponse = await res.json();
       const durationMs = Date.now() - start;
 
-      if (data.error) {
+      onGovernanceUpdate(data.ledger, data.memory, data.memory.cacheHit);
+
+      if (data.source === "denied") {
         onPaymentEvent({
-          id,
-          timestamp: new Date().toISOString(),
-          tool: tool.name,
-          buyerPattern,
-          status: "error",
-          amount: tool.cost,
-          message: data.error,
+          id, timestamp: new Date().toISOString(), tool: tool.name,
+          status: "denied", amount: tool.cost,
+          message: data.error ?? data.policy.reason ?? "Policy denied",
+          policyDecision: data.policy,
         });
         onResult({
-          id,
-          timestamp,
-          tool: tool.name,
-          buyerPattern,
-          error: data.error,
-          durationMs,
+          id, timestamp, tool: tool.name,
+          error: data.error ?? `Policy denied: ${data.policy.reason}`,
+          durationMs, source: "denied",
+          policyDecision: data.policy,
+        });
+      } else if (data.source === "cache") {
+        onPaymentEvent({
+          id, timestamp: new Date().toISOString(), tool: tool.name,
+          status: "cached", amount: tool.cost,
+          message: "Cache hit — no payment needed",
+          memoryHit: true,
+          policyDecision: data.policy,
+        });
+        onResult({
+          id, timestamp, tool: tool.name,
+          result: data.result, durationMs, source: "cache",
+          policyDecision: data.policy, memoryHit: true,
         });
       } else {
         onPaymentEvent({
-          id,
-          timestamp: new Date().toISOString(),
-          tool: tool.name,
-          buyerPattern,
-          status: "settled",
-          amount: tool.cost,
-          message: "Payment settled successfully",
+          id, timestamp: new Date().toISOString(), tool: tool.name,
+          status: "settled", amount: tool.cost,
+          message: data.paymentMeta?.transaction
+            ? `Settled on-chain: ${data.paymentMeta.transaction.slice(0, 10)}...`
+            : "Payment settled",
+          policyDecision: data.policy,
+          txHash: data.paymentMeta?.transaction,
         });
         onResult({
-          id,
-          timestamp,
-          tool: tool.name,
-          buyerPattern,
-          result: data.result,
-          durationMs,
+          id, timestamp, tool: tool.name,
+          result: data.result, durationMs, source: "paid",
+          policyDecision: data.policy,
+          paymentMeta: data.paymentMeta,
         });
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       onPaymentEvent({
-        id,
-        timestamp: new Date().toISOString(),
-        tool: tool.name,
-        buyerPattern,
-        status: "error",
-        message: msg,
+        id, timestamp: new Date().toISOString(), tool: tool.name,
+        status: "error", message: msg,
       });
       onResult({
-        id,
-        timestamp,
-        tool: tool.name,
-        buyerPattern,
-        error: msg,
-        durationMs: Date.now() - start,
+        id, timestamp, tool: tool.name,
+        error: msg, durationMs: Date.now() - start, source: "denied",
       });
     } finally {
       setIsLoading(false);
@@ -178,19 +136,13 @@ export function ToolInvoker({
     <section className="rounded-xl border border-card-border bg-card p-5 space-y-5">
       <h2 className="text-lg font-semibold">Invoke Tool</h2>
 
-      {/* Tool selector */}
       <div className="flex gap-2 flex-wrap">
         {TOOLS.map((t, i) => (
           <button
             key={t.name}
-            onClick={() => {
-              setSelectedTool(i);
-              setArgs({});
-            }}
+            onClick={() => { setSelectedTool(i); setArgs({}); }}
             className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-              selectedTool === i
-                ? "bg-accent text-white"
-                : "bg-card-border/50 hover:bg-card-border"
+              selectedTool === i ? "bg-accent text-white" : "bg-card-border/50 hover:bg-card-border"
             }`}
           >
             {t.label}
@@ -199,13 +151,10 @@ export function ToolInvoker({
         ))}
       </div>
 
-      {/* Tool args */}
       <div className="space-y-3">
         {tool.fields.map((f) => (
           <div key={f.key}>
-            <label className="block text-xs font-medium text-muted mb-1">
-              {f.label}
-            </label>
+            <label className="block text-xs font-medium text-muted mb-1">{f.label}</label>
             {f.type === "select" ? (
               <select
                 value={args[f.key] ?? (f.options as readonly string[])[0]}
@@ -213,9 +162,7 @@ export function ToolInvoker({
                 className="w-full rounded-lg border border-card-border bg-background px-3 py-2 text-sm"
               >
                 {(f.options as readonly string[]).map((o) => (
-                  <option key={o} value={o}>
-                    {o}
-                  </option>
+                  <option key={o} value={o}>{o}</option>
                 ))}
               </select>
             ) : f.type === "textarea" ? (
@@ -239,39 +186,6 @@ export function ToolInvoker({
         ))}
       </div>
 
-      {/* Buyer pattern */}
-      <div>
-        <label className="block text-xs font-medium text-muted mb-2">
-          Buyer Pattern
-        </label>
-        <div className="space-y-2">
-          {BUYER_PATTERNS.map((bp) => (
-            <label
-              key={bp.value}
-              className={`flex items-center gap-3 p-2.5 rounded-lg border cursor-pointer transition-colors ${
-                buyerPattern === bp.value
-                  ? "border-accent bg-accent/10"
-                  : "border-card-border hover:border-accent/50"
-              }`}
-            >
-              <input
-                type="radio"
-                name="buyerPattern"
-                value={bp.value}
-                checked={buyerPattern === bp.value}
-                onChange={() => setBuyerPattern(bp.value)}
-                className="accent-accent"
-              />
-              <div>
-                <span className="text-sm font-medium">{bp.label}</span>
-                <p className="text-xs text-muted">{bp.desc}</p>
-              </div>
-            </label>
-          ))}
-        </div>
-      </div>
-
-      {/* Submit */}
       <button
         onClick={handleInvoke}
         disabled={isLoading}
