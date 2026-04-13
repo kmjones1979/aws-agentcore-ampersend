@@ -8,7 +8,8 @@ TypeScript monorepo that connects **AWS Bedrock AgentCore** (optional deploy tar
 
 - [Architecture and data flow](#architecture-and-data-flow)
 - [How each product fits](#how-each-product-fits)
-- [Setup and testing](#setup-and-testing)
+- [AgentCore and Ampersend SDK in code](#agentcore-and-ampersend-sdk-in-code)
+- [Quick start](#quick-start)
 - [Environment variables](#environment-variables)
 - [Scripts](#scripts)
 - [AgentCore wallet (buyer)](#agentcore-wallet-buyer)
@@ -84,6 +85,35 @@ flowchart TB
 
 - **Role:** Paid **OpenAI-compatible** API at `https://blockrun.ai/api` (e.g. `/v1/chat/completions`), gated by **x402**.
 - **In this repo:** `packages/seller/src/clawrouter.ts` implements the same **EOA EIP-712** pattern as [ClawRouter `x402.ts`](https://github.com/edgeandnode/ClawRouter/blob/main/src/x402.ts). **Ampersend `SmartAccountWallet` / ERC-1271** payloads are **not** compatible with BlockRun's on-chain verifier—use a **funded EOA** for the BlockRun leg.
+
+---
+
+## AgentCore and Ampersend SDK in code
+
+This section maps **AWS Bedrock AgentCore** and **`@ampersend_ai/ampersend-sdk`** to concrete files. The npm package is [`@ampersend_ai/ampersend-sdk`](https://www.npmjs.com/package/@ampersend_ai/ampersend-sdk) (see also [ampersend-sdk on GitHub](https://github.com/edgeandnode/ampersend-sdk)).
+
+### AgentCore (`bedrock-agentcore` + project layout)
+
+| What | Where in this repo |
+|------|-------------------|
+| **AgentCore Runtime HTTP app** | `app/AgentBuyer/agent.ts` imports **`BedrockAgentCoreApp`** from **`bedrock-agentcore/runtime`**. The app registers an `invocationHandler.process` that receives `payload` + **`context.sessionId`**, parses a natural-language `prompt` into an MCP tool name + args (`parseIntent`), then calls **`callSellerTool()`** — which uses the same **wallet + Ampersend MCP client** pattern as local buyers (below). |
+| **CLI / deploy metadata** | `agentcore/agentcore.json` — declares an **`AgentCoreRuntime`** agent (`AgentBuyer`), **container** build, **`modelProvider`: `"Bedrock"`**, and **`protocol`: `"HTTP"`**. That aligns deployments with [Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/); it does **not** cause `agent.ts` to call Bedrock chat APIs (completions still come from **BlockRun** inside the seller). |
+| **“AgentCore wallet” (naming + credentials)** | `packages/buyer/src/agentcore-wallet.ts` — **`AgentCoreWalletProvider.create()`** and **`createAgentCoreWallet()`**. This is the **production-shaped** pattern: prefer **Coinbase CDP** (`CdpEvmWalletProvider` via `cdp-viem-account.ts`) when `CDP_*` env vars are set, else **`BUYER_PRIVATE_KEY`**. The class wraps Ampersend’s **`AccountWallet`** and exposes **`createNaiveTreasurer()`** so MCP payments auto-sign. Treat secrets like you would in **AgentCore** (e.g. AWS Secrets Manager in cloud). |
+| **Re-use from other packages** | After `pnpm --filter @poc/buyer build`, import **`createAgentCoreWallet`** from **`@poc/buyer/agentcore-wallet`** (used by `app/AgentBuyer` and `packages/web`). |
+
+**Not** wired here: managed **AgentCore Policy** (Cedar at the gateway), **AgentCore Memory** APIs, and **AgentCore Observability** in AWS — those are separate AWS resources. The optional branch **`agent-core-extended`** adds **local** policy, memory, and OpenTelemetry-style tracing that *mirror* those concepts for demos; see that branch’s README and `packages/buyer/src/policy.ts`, `memory.ts`, `telemetry.ts` if you need the extended story.
+
+### Ampersend SDK (`@ampersend_ai/ampersend-sdk`)
+
+| Module / entry | Role | Files |
+|----------------|------|--------|
+| **`mcp/server/fastmcp`** | **FastMCP** server and **`withX402Payment`** — declare per-tool USDC requirements and settle after the buyer pays. | `packages/seller/src/index.ts` (`FastMCP`, `withX402Payment`, tool handlers). |
+| **`mcp/client`** | **MCP `Client`** + **`StreamableHTTPClientTransport`** — connect to the seller HTTP MCP URL, **`callTool`**, handle 402 + retry with signed payment via a **treasurer**. | `packages/buyer/src/naive-buyer.ts`, `mcp-buyer.ts`, `packages/web/src/app/api/invoke/route.ts`, `app/AgentBuyer/agent.ts`. |
+| **`x402`** | **`AccountWallet`**, **`X402Treasurer`**, **`createPayment`** — EIP-3009 style payments for tool leg; **`createNaiveTreasurer()`** in `agentcore-wallet.ts` implements the treasurer interface (auto-approve). | `packages/buyer/src/agentcore-wallet.ts`, `http-buyer.ts`. |
+| **Root SDK** | **`initializeProxyServer`** — MCP payment **proxy** (HTTP transport). | `packages/buyer/src/proxy.ts`. |
+| **`createAmpersendTreasurer`** | Spend-limit / API-backed treasurer (when using **`pnpm buyer:mcp`** and Ampersend API env). | `packages/buyer/src/mcp-buyer.ts`. |
+
+**x402 settlement outside Ampersend:** the seller uses **`@x402/core`** and **`@x402/evm`** (`ExactEvmSchemeV1`, local **`x402Facilitator`**) in `packages/seller/src/index.ts` to **verify** and **settle** on-chain after Ampersend has handled the MCP/x402 handshake — that is the facilitator signer + USDC contract path documented in [Architecture and data flow](#architecture-and-data-flow).
 
 ---
 
@@ -230,6 +260,8 @@ Copy **`.env.example`** as a template; never commit real secrets.
 ---
 
 ## AgentCore wallet (buyer)
+
+See **[AgentCore and Ampersend SDK in code](#agentcore-and-ampersend-sdk-in-code)** for the full file map.
 
 Implementation: `packages/buyer/src/agentcore-wallet.ts`, CDP bridge: `cdp-viem-account.ts`. **`CdpEvmWalletProvider`** is wrapped with viem **`toAccount()`** so **`AccountWallet`** can sign x402.
 
